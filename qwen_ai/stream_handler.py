@@ -10,12 +10,15 @@ from http.client import IncompleteRead
 class QwenAiStreamHandler:
     """Qwen AI Stream Handler"""
     
-    def __init__(self, model: str, on_end: Optional[Callable[[str], None]] = None):
+    def __init__(self, model: str, on_end: Optional[Callable[[str], None]] = None,
+                 auto_delete_chat: bool = False, delete_chat_func: Optional[Callable[[str], bool]] = None):
         """Initialize stream handler
         
         Args:
             model: Model name
             on_end: Callback function when stream ends
+            auto_delete_chat: Whether to auto delete chat after completion
+            delete_chat_func: Function to delete chat (receives chat_id, returns bool)
         """
         self.chat_id = ''
         self.model = model
@@ -24,10 +27,23 @@ class QwenAiStreamHandler:
         self.response_id = ''
         self.content = ''
         self.tool_calls_sent = False
+        self.auto_delete_chat = auto_delete_chat
+        self.delete_chat_func = delete_chat_func
     
     def set_chat_id(self, chat_id: str):
         """Set chat ID"""
         self.chat_id = chat_id
+    
+    def _handle_completion(self, chat_id: str):
+        """Handle completion - call on_end callback and optionally delete chat"""
+        if self.on_end:
+            self.on_end(chat_id)
+        if self.auto_delete_chat and self.delete_chat_func and chat_id:
+            try:
+                self.delete_chat_func(chat_id)
+                print(f'[QwenAI] Auto-deleted chat: {chat_id}')
+            except Exception as e:
+                print(f'[QwenAI] Failed to auto-delete chat {chat_id}: {e}')
     
     def _parse_sse_line(self, line: str) -> Optional[str]:
         """Parse SSE line and return data"""
@@ -227,8 +243,7 @@ class QwenAiStreamHandler:
                         yield f'data: {json.dumps(final_chunk)}\n\n'
                         yield 'data: [DONE]\n\n'
                         
-                        if self.on_end and self.chat_id:
-                            self.on_end(self.chat_id)
+                        self._handle_completion(self.chat_id)
                         return
                         
                 except json.JSONDecodeError:
@@ -251,8 +266,7 @@ class QwenAiStreamHandler:
             yield f'data: {json.dumps(final_chunk)}\n\n'
             yield 'data: [DONE]\n\n'
             
-            if self.on_end and self.chat_id:
-                self.on_end(self.chat_id)
+            self._handle_completion(self.chat_id)
     
     def handle_non_stream(self, response) -> Dict[str, Any]:
         """Handle non-streaming response like Chat2API
@@ -329,8 +343,7 @@ class QwenAiStreamHandler:
                             if final_reasoning:
                                 data['choices'][0]['message']['reasoning_content'] = final_reasoning
                             
-                            if self.on_end and self.chat_id:
-                                self.on_end(self.chat_id)
+                            self._handle_completion(self.chat_id)
                             return data
                     elif phase is None and content:
                         data['choices'][0]['message']['content'] += content
@@ -346,8 +359,7 @@ class QwenAiStreamHandler:
         if final_reasoning:
             data['choices'][0]['message']['reasoning_content'] = final_reasoning
         
-        if self.on_end and self.chat_id:
-            self.on_end(self.chat_id)
+        self._handle_completion(self.chat_id)
         
         return data
     
@@ -398,8 +410,7 @@ class QwenAiStreamHandler:
             yield f'data: {json.dumps(finish_chunk)}\n\n'
             yield 'data: [DONE]\n\n'
             
-            if self.on_end and self.chat_id:
-                self.on_end(self.chat_id)
+            self._handle_completion(self.chat_id)
     
     def _parse_tool_use(self, content: str) -> Optional[list]:
         """Parse tool use from content"""

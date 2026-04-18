@@ -169,8 +169,13 @@ class QwenAiAdapter:
     
     def chat_completion(self, model: str, messages: list, stream: bool = True, 
                       temperature: Optional[float] = None, enable_thinking: Optional[bool] = None, 
-                      thinking_budget: Optional[int] = None) -> Tuple[requests.Response, str, Optional[str]]:
-        """Send chat completion request"""
+                      thinking_budget: Optional[int] = None,
+                      auto_delete_chat: bool = False) -> Tuple[requests.Response, str, Optional[str]]:
+        """Send chat completion request
+        
+        Args:
+            auto_delete_chat: Whether to delete the chat after completion
+        """
         if not self.token:
             raise ValueError('Qwen AI token not configured')
         

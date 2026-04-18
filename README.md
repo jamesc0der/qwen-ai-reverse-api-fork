@@ -33,7 +33,9 @@ pip install -r requirements.txt
 
 ## 🚀 快速开始
 
-### 1. 获取 JWT Token
+### 1. 快速配置
+
+#### 1.1 获取 JWT Token
 
 ![获取Token步骤](docs/1.png)
 1. 访问 https://chat.qwen.ai 并登录账号
@@ -41,17 +43,25 @@ pip install -r requirements.txt
 3. 进入 **Application** → **Local Storage** → **https://chat.qwen.ai**
 4. 复制 `token` 键的值
 
+#### 1.2 创建 .env 文件
+
+```bash
+# 复制示例配置文件
+cp .env.example .env
+
+# 编辑 .env 文件，填写你的配置
+```
 
 ### 2. 启动服务
 
 ```bash
-python start_server.py --host 0.0.0.0 --port 8080
+python server.py
 ```
 
 ### 3. 测试 API
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
+curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer <YOUR_JWT_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -104,6 +114,15 @@ POST /v1/chat/completions
 | messages | array | 是 | 消息列表 |
 | stream | boolean | 否 | 是否流式输出，默认 false |
 | temperature | float | 否 | 温度参数，默认 null |
+
+### 自动删除对话
+
+设置 `AUTO_DELETE_CHAT=true` 环境变量后，每次对话完成时会自动删除网页对话记录，保持账户清洁。
+
+```bash
+# .env 文件配置
+AUTO_DELETE_CHAT=true
+```
 
 ### Token 健康检查
 
@@ -413,10 +432,17 @@ qwen-ai-reverse-api/
 │   ├── adapter.py         # API 适配器
 │   ├── client.py          # OpenAI 兼容客户端
 │   ├── stream_handler.py  # 流处理
-│   └── tool_parser.py     # 工具解析
+│   ├── tool_parser.py     # 工具解析
+│   ├── vless_proxy.py     # Vless 代理池
+│   ├── subscription.py    # 订阅管理
+│   ├── node_storage.py    # 节点存储
+│   └── node_tester.py     # 节点测试
 ├── server.py              # FastAPI 服务
 ├── start_server.py        # 启动脚本
 ├── requirements.txt       # 依赖
+├── .env.example           # 环境变量示例
+├── proxy_config.example.txt # 代理配置示例
+├── PROXY_SETUP.md         # 代理配置文档
 └── README.md              # 文档
 ```
 

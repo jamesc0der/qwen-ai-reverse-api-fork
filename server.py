@@ -28,11 +28,14 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     tools: Optional[List[Dict]] = None
     tool_choice: Optional[str] = None
-    # Context support: pass chat_id to continue conversation
     chat_id: Optional[str] = None
-    
+
     class Config:
         extra = "allow"
+
+
+# Global settings from environment
+AUTO_DELETE_CHAT = os.environ.get('AUTO_DELETE_CHAT', 'false').lower() == 'true'
 
 
 class ModelInfo(BaseModel):
@@ -177,103 +180,110 @@ async def chat_completions(
     """Chat completions endpoint with context support and token rotation"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    
+
     if authorization.startswith("Bearer "):
         jwt_token_string = authorization[7:]
     else:
         jwt_token_string = authorization
-    
+
     if not jwt_token_string:
         raise HTTPException(status_code=401, detail="Invalid Authorization header format")
-    
+
     try:
-        # Support multiple tokens - randomly select one
         jwt_token = select_random_token(jwt_token_string)
-        
+
         client = QwenAiClient(token=jwt_token)
-        
-        # Check if continuing existing conversation
+
         existing_chat_id = request.chat_id
-        
+
         if request.stream:
             return StreamingResponse(
-                openai_stream(client, request.model, request.messages, request.temperature, existing_chat_id),
+                openai_stream(client, request.model, request.messages, request.temperature, existing_chat_id, AUTO_DELETE_CHAT),
                 media_type="text/event-stream"
             )
         else:
-            return await openai_non_stream(client, request.model, request.messages, request.temperature, existing_chat_id)
-    
+            return await openai_non_stream(client, request.model, request.messages, request.temperature, existing_chat_id, AUTO_DELETE_CHAT)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def openai_non_stream(client, model, messages, temperature, existing_chat_id=None):
+async def openai_non_stream(client, model, messages, temperature, existing_chat_id=None, auto_delete_chat=False):
     """Non-streaming response with context support"""
     chat_id = existing_chat_id
-    
+    chat_created = False
+
     try:
         if chat_id:
-            # Continue existing chat - need to send follow-up message
-            # For now, create new chat with full history
             response, new_chat_id, _ = client.adapter.chat_completion(
                 model=model,
                 messages=messages,
                 stream=True,
-                temperature=temperature
+                temperature=temperature,
+                auto_delete_chat=auto_delete_chat
             )
             chat_id = new_chat_id
+            chat_created = True
         else:
-            # New chat
             response, chat_id, _ = client.adapter.chat_completion(
                 model=model,
                 messages=messages,
                 stream=True,
-                temperature=temperature
+                temperature=temperature,
+                auto_delete_chat=auto_delete_chat
             )
-        
+            chat_created = True
+
         content = ''
         reasoning = ''
         response_id = ''
         created = int(time.time())
-        
+
         for line in response.iter_lines():
             if not line:
                 continue
             line_str = line.decode('utf-8')
             if not line_str.startswith('data: '):
                 continue
-            
+
             data_str = line_str[6:]
             if data_str == '[DONE]':
                 break
-            
+
             try:
                 data = json.loads(data_str)
                 if data.get('response.created', {}).get('response_id'):
                     response_id = data['response.created']['response_id']
-                
+
                 if data.get('choices'):
                     delta = data['choices'][0].get('delta', {})
                     phase = delta.get('phase')
                     status = delta.get('status')
                     text = delta.get('content', '')
-                    
+
                     if phase == 'think' and status != 'finished':
                         reasoning += text
                     elif phase == 'answer' or phase is None:
                         content += text
             except:
                 pass
-        
-        # Save session for context
-        session_manager.set(chat_id, model, messages + [{'role': 'assistant', 'content': content}])
-        
+
+        # Handle auto delete or session save
+        if auto_delete_chat and chat_created and chat_id:
+            try:
+                client.adapter.delete_chat(chat_id)
+                print(f'[Server] Auto-deleted chat: {chat_id}')
+            except Exception as e:
+                print(f'[Server] Failed to auto-delete chat {chat_id}: {e}')
+        else:
+            session_manager.set(chat_id, model, messages + [{'role': 'assistant', 'content': content}])
+
         return JSONResponse(content={
             'id': response_id or '',
             'object': 'chat.completion',
             'created': created,
             'model': model,
-            'chat_id': chat_id,  # Return chat_id for context
+            'chat_id': chat_id if not auto_delete_chat else None,
             'choices': [{
                 'index': 0,
                 'message': {
@@ -285,9 +295,8 @@ async def openai_non_stream(client, model, messages, temperature, existing_chat_
             }],
             'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}
         })
-    
+
     except Exception as e:
-        # Clean up on error
         if chat_id:
             try:
                 client.adapter.delete_chat(chat_id)
@@ -296,13 +305,14 @@ async def openai_non_stream(client, model, messages, temperature, existing_chat_
         raise
 
 
-def openai_stream(client, model, messages, temperature, existing_chat_id=None):
+def openai_stream(client, model, messages, temperature, existing_chat_id=None, auto_delete_chat=False):
     """Streaming response with context support, thinking and image generation"""
     chat_id = existing_chat_id
     created = int(time.time())
     full_content = ''
     reasoning_content = ''
     has_sent_role = False
+    chat_created = False
     
     try:
         if chat_id:
@@ -311,18 +321,22 @@ def openai_stream(client, model, messages, temperature, existing_chat_id=None):
                 model=model,
                 messages=messages,
                 stream=True,
-                temperature=temperature
+                temperature=temperature,
+                auto_delete_chat=auto_delete_chat
             )
             chat_id = new_chat_id
+            chat_created = True
         else:
             # New chat
             response, chat_id, _ = client.adapter.chat_completion(
                 model=model,
                 messages=messages,
                 stream=True,
-                temperature=temperature
+                temperature=temperature,
+                auto_delete_chat=auto_delete_chat
             )
-        
+            chat_created = True
+
         response_id = ''
         
         for line in response.iter_lines():
@@ -443,9 +457,17 @@ def openai_stream(client, model, messages, temperature, existing_chat_id=None):
                         openai_chunk['choices'][0]['finish_reason'] = 'stop'
                         yield f'data: {json.dumps(openai_chunk)}\n\n'
                         yield 'data: [DONE]\n\n'
-                        
-                        # Save session for context
-                        session_manager.set(chat_id, model, messages + [{'role': 'assistant', 'content': full_content}])
+
+                        # Handle auto delete or session save
+                        if auto_delete_chat and chat_created and chat_id:
+                            try:
+                                client.adapter.delete_chat(chat_id)
+                                print(f'[Server] Auto-deleted chat: {chat_id}')
+                            except Exception as e:
+                                print(f'[Server] Failed to auto-delete chat {chat_id}: {e}')
+                        else:
+                            # Save session for context
+                            session_manager.set(chat_id, model, messages + [{'role': 'assistant', 'content': full_content}])
                         break
                     
             except json.JSONDecodeError:

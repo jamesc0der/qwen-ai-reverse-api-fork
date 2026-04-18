@@ -17,11 +17,12 @@ class QwenAiClient:
         """
         self.adapter = QwenAiAdapter(token, cookies)
     
-    def chat_completions(self, model: str, messages: List[Dict], stream: bool = False, 
+    def chat_completions(self, model: str, messages: List[Dict], stream: bool = False,
                         temperature: Optional[float] = None, tools: Optional[List[Dict]] = None,
-                        enable_thinking: Optional[bool] = None, thinking_budget: Optional[int] = None) -> Any:
+                        enable_thinking: Optional[bool] = None, thinking_budget: Optional[int] = None,
+                        auto_delete_chat: bool = False) -> Any:
         """Chat completions API
-        
+
         Args:
             model: Model name
             messages: List of messages
@@ -30,45 +31,45 @@ class QwenAiClient:
             tools: List of tools for function calling
             enable_thinking: Whether to enable thinking mode
             thinking_budget: Thinking budget
-        
+            auto_delete_chat: Whether to delete the chat after completion
+
         Returns:
             Generator for streaming, dict for non-streaming
         """
-        # Process tools if provided
         processed_messages = messages.copy()
         if tools:
-            # Check if system prompt already has tool definitions
             has_tool_prompt = any(
-                msg.get('role') == 'system' and 
+                msg.get('role') == 'system' and
                 ('Available Tools' in msg.get('content', '') or '<tools>' in msg.get('content', ''))
                 for msg in messages
             )
-            
+
             if not has_tool_prompt:
-                # Add tool definitions to system prompt
                 tool_prompt = ToolParser.tools_to_system_prompt(tools)
-                
-                # Find or create system message
+
                 system_messages = [msg for msg in processed_messages if msg.get('role') == 'system']
                 if system_messages:
                     system_messages[0]['content'] = system_messages[0]['content'] + '\n\n' + tool_prompt
                 else:
                     processed_messages.insert(0, {'role': 'system', 'content': tool_prompt})
-        
-        # Make request
+
         response, chat_id, parent_id = self.adapter.chat_completion(
             model=model,
             messages=processed_messages,
             stream=stream,
             temperature=temperature,
             enable_thinking=enable_thinking,
-            thinking_budget=thinking_budget
+            thinking_budget=thinking_budget,
+            auto_delete_chat=auto_delete_chat
         )
-        
-        # Create stream handler
-        handler = QwenAiStreamHandler(model, lambda cid: self.adapter.delete_chat(cid))
+
+        handler = QwenAiStreamHandler(
+            model,
+            auto_delete_chat=auto_delete_chat,
+            delete_chat_func=self.adapter.delete_chat
+        )
         handler.set_chat_id(chat_id)
-        
+
         if stream:
             return handler.handle_stream(response)
         else:
