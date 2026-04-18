@@ -2,44 +2,14 @@
 
 ## 快速开始
 
-### 1. 运行配置脚本
-
-```bash
-python setup_proxy.py
-```
-
-按提示输入：
-- 订阅 URL
-- 节点匹配规则（如 `CF优选-电信`）
-- 其他选项
-
-### 2. 启动服务
-
-```bash
-# 方式一：使用代理启动脚本
-python start_with_proxy.py
-
-# 方式二：直接启动（需先设置环境变量）
-python server.py
-```
-
-### 3. 验证代理
-
-```bash
-# 查看代理统计
-curl http://localhost:8000/v1/proxy/stats
-
-# 查看可用节点
-curl http://localhost:8000/v1/proxy/nodes
-```
-
-## 手动配置
-
-### 环境变量
+### 1. 配置代理
 
 创建 `.env` 文件：
 
 ```bash
+# 启用代理功能
+PROXY_ENABLED=true
+
 # 订阅URL（支持多个，用逗号分隔）
 VLESS_SUBSCRIPTION_URLS=https://example.com/subscription
 
@@ -53,9 +23,46 @@ VLESS_AUTO_REFRESH_ON_START=true
 VLESS_STORAGE_FILE=vless_nodes.json
 ```
 
-### API 端点
+### 2. 启动服务
 
-#### 获取代理统计
+```bash
+# 启动服务（代理会根据配置自动启用/禁用）
+python start_server.py
+```
+
+### 3. 验证代理
+
+```bash
+# 查看代理统计
+curl http://localhost:8000/v1/proxy/stats
+
+# 查看可用节点
+curl http://localhost:8000/v1/proxy/nodes
+```
+
+## 配置说明
+
+### 环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `PROXY_ENABLED` | 是否启用代理功能 | `false` |
+| `VLESS_SUBSCRIPTION_URLS` | 订阅URL（多个用逗号分隔） | - |
+| `VLESS_SUBSCRIPTION_PATTERNS` | 节点匹配规则 | `CF优选-电信` |
+| `VLESS_AUTO_REFRESH_ON_START` | 启动时自动刷新订阅 | `true` |
+| `VLESS_STORAGE_FILE` | 节点存储文件 | `vless_nodes.json` |
+
+### 管理后台配置
+
+访问 `http://localhost:8000/admin`，进入"设置"页面：
+
+1. **启用代理** - 开启/关闭代理功能
+2. **订阅 URL** - 填写订阅链接（多个用逗号分隔）
+3. **节点匹配规则** - 填写匹配规则（如 `CF优选-电信`）
+
+## API 端点
+
+### 获取代理统计
 ```bash
 GET /v1/proxy/stats
 ```
@@ -74,7 +81,7 @@ GET /v1/proxy/stats
 }
 ```
 
-#### 刷新订阅
+### 刷新订阅
 ```bash
 POST /v1/proxy/refresh
 Content-Type: application/json
@@ -98,7 +105,7 @@ Content-Type: application/json
 }
 ```
 
-#### 获取节点列表
+### 获取节点列表
 ```bash
 GET /v1/proxy/nodes?pattern=CF优选-电信&only_available=true
 ```
@@ -124,7 +131,7 @@ GET /v1/proxy/nodes?pattern=CF优选-电信&only_available=true
 }
 ```
 
-#### 测试节点
+### 测试节点
 ```bash
 POST /v1/proxy/test
 Content-Type: application/json
@@ -159,17 +166,19 @@ Content-Type: application/json
 ```
 1. 服务启动
    ↓
-2. 从订阅URL获取节点
+2. 检查 PROXY_ENABLED
+   ↓ (如果启用)
+3. 从订阅URL获取节点
    ↓
-3. 按规则筛选节点（如 CF优选-电信）
+4. 按规则筛选节点（如 CF优选-电信）
    ↓
-4. 测试节点可用性
+5. 测试节点可用性
    ↓
-5. 存储可用节点到本地 (vless_nodes.json)
+6. 存储可用节点到本地 (vless_nodes.json)
    ↓
-6. API调用时随机使用可用节点
+7. API调用时随机使用可用节点
    ↓
-7. 使用后标记节点结果（成功/失败）
+8. 使用后标记节点结果（成功/失败）
 ```
 
 ## 节点选择策略
@@ -203,9 +212,16 @@ VLESS_SUBSCRIPTION_PATTERNS=CF.*电信.*
 
 ## 故障排查
 
+### 代理未启用
+
+检查 `.env` 文件：
+```bash
+PROXY_ENABLED=true
+```
+
 ### 代理池未初始化
 
-检查环境变量：
+检查订阅URL：
 ```bash
 echo $VLESS_SUBSCRIPTION_URLS
 ```
