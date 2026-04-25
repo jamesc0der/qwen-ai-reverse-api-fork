@@ -66,7 +66,8 @@ class QwenAiClient:
         handler = QwenAiStreamHandler(
             model,
             auto_delete_chat=auto_delete_chat,
-            delete_chat_func=self.adapter.delete_chat
+            delete_chat_func=self.adapter.delete_chat,
+            tools=tools
         )
         handler.set_chat_id(chat_id)
 

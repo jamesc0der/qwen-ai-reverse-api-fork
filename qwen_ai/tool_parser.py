@@ -17,7 +17,19 @@ class ToolParser:
         Returns:
             bool: True if content contains tool use
         """
-        return '[function_calls]' in content or '<tool_use>' in content
+        # Check for standard formats
+        if '[function_calls]' in content or '<tool_use>' in content:
+            return True
+        
+        # Check for simplified bracket format: [tool_name]{...}[/tool_name]
+        # Use DOTALL flag to match across newlines, and non-greedy matching
+        simplified_pattern = r'\[(\w+)\]\s*\{.*?\}\s*\[/\1\]'
+        matches = re.findall(simplified_pattern, content, re.DOTALL)
+        for name in matches:
+            if name.lower() not in ['function_calls', 'call']:
+                return True
+        
+        return False
     
     @staticmethod
     def parse_tool_use(content: str) -> Optional[List[Dict]]:
@@ -63,6 +75,29 @@ class ToolParser:
                 except json.JSONDecodeError:
                     continue
         
+        # Fallback: Check for simplified bracket format: [tool_name]{...}[/tool_name]
+        # This handles cases where Qwen uses [todo_write]...[/todo_write] instead of [function_calls][call:todo_write]...[/call][/function_calls]
+        if not tool_calls:
+            # Use DOTALL flag to match across newlines, and non-greedy matching
+            simplified_pattern = r'\[(\w+)\]\s*(\{.*?\})\s*\[/\1\]'
+            matches = re.findall(simplified_pattern, content, re.DOTALL)
+            for i, (name, args) in enumerate(matches):
+                # Skip if this looks like regular markdown or non-tool brackets
+                if name.lower() in ['function_calls', 'call']:
+                    continue
+                try:
+                    # Verify it's valid JSON
+                    json.loads(args)
+                    tool_calls.append({
+                        'id': f'tool_{i}',
+                        'function': {
+                            'name': name,
+                            'arguments': args
+                        }
+                    })
+                except json.JSONDecodeError:
+                    continue
+        
         return tool_calls if tool_calls else None
     
     @staticmethod
@@ -99,7 +134,7 @@ CRITICAL: Tool names are CASE-SENSITIVE. You MUST use the exact tool name as def
 When you decide to call a tool, you MUST respond with NOTHING except a single [function_calls] block exactly like the template below:
 
 [function_calls]
-[call:exact_tool_name_from_list]{"argument": "value"}[/call]
+[call:exact_tool_name_from_list]{{"argument": "value"}}[/call]
 [/function_calls]
 
 CRITICAL RULES:

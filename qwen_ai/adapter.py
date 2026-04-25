@@ -117,6 +117,7 @@ class QwenAiAdapter:
             'title': title,
             'models': [model_id],
             'chat_mode': 'normal',
+            # 'chat_mode': 'local',
             'chat_type': 't2t',
             'timestamp': int(time.time() * 1000),
             'project_id': '',
@@ -208,7 +209,21 @@ class QwenAiAdapter:
             elif msg['role'] == 'user':
                 conversation_parts.append(f"User: {msg['content']}")
             elif msg['role'] == 'assistant':
-                conversation_parts.append(f"Assistant: {msg['content']}")
+                # If assistant has tool_calls, we should ideally represent them, 
+                # but for now, we'll just use the content if available or skip if it was a pure tool call
+                if msg.get('content'):
+                    conversation_parts.append(f"Assistant: {msg['content']}")
+            elif msg['role'] == 'tool':
+                # ✅ Handle tool results
+                # Qwen expects tool results to be clearly marked
+                tool_call_id = msg.get('tool_call_id', 'unknown')
+                content = msg['content']
+                # If content is a list (OpenAI style), extract text
+                if isinstance(content, list):
+                    text_parts = [item['text'] for item in content if item.get('type') == 'text']
+                    content = '\n'.join(text_parts)
+                
+                conversation_parts.append(f"Tool Result [{tool_call_id}]: {content}")
         
         # Combine all messages into user_content
         user_content = '\n\n'.join(conversation_parts)

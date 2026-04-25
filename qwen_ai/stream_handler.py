@@ -11,7 +11,8 @@ class QwenAiStreamHandler:
     """Qwen AI Stream Handler"""
     
     def __init__(self, model: str, on_end: Optional[Callable[[str], None]] = None,
-                 auto_delete_chat: bool = False, delete_chat_func: Optional[Callable[[str], bool]] = None):
+                 auto_delete_chat: bool = False, delete_chat_func: Optional[Callable[[str], bool]] = None,
+                 tools: Optional[list[Dict]] = None):
         """Initialize stream handler
         
         Args:
@@ -19,6 +20,7 @@ class QwenAiStreamHandler:
             on_end: Callback function when stream ends
             auto_delete_chat: Whether to auto delete chat after completion
             delete_chat_func: Function to delete chat (receives chat_id, returns bool)
+            tools: List of tool definitions (if present, enables aggressive tool call detection)
         """
         self.chat_id = ''
         self.model = model
@@ -29,6 +31,7 @@ class QwenAiStreamHandler:
         self.tool_calls_sent = False
         self.auto_delete_chat = auto_delete_chat
         self.delete_chat_func = delete_chat_func
+        self.tools = tools  # Store tools to know if we should expect tool calls
     
     def set_chat_id(self, chat_id: str):
         """Set chat ID"""
@@ -64,6 +67,12 @@ class QwenAiStreamHandler:
         has_sent_reasoning = False
         summary_text = ''
         initial_chunk_sent = False
+        content_buffer = ''
+        detected_tool_call = False  # Track if we've detected a tool call in progress
+        
+        # If tools are provided, we assume any content might be a tool call until proven otherwise.
+        # We buffer everything in the 'answer' phase and only flush if no tool call is detected by the end.
+        expect_tools = self.tools is not None and len(self.tools) > 0
         
         try:
             # Direct line iteration like Chat2API - no sseclient buffering
@@ -174,7 +183,7 @@ class QwenAiStreamHandler:
                                 'id': '',
                                 'model': self.model,
                                 'object': 'chat.completion.chunk',
-                                'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}],
+                                'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}],
                                 'created': self.created,
                             }
                             yield f'data: {json.dumps(initial_chunk)}\n\n'
@@ -182,7 +191,48 @@ class QwenAiStreamHandler:
                         
                         self.content += content
                         
-                        if content:
+                        # Check if we now have a tool call marker (standard or simplified format)
+                        if not detected_tool_call:
+                            if '[function_calls]' in self.content or '<tool_use>' in self.content:
+                                detected_tool_call = True
+                            else:
+                                # Check for simplified format: [tool_name]{...}[/tool_name]
+                                # We look for [name] followed by { or [ and ensure [/name] exists
+                                simplified_pattern = r'\[(\w+)\]\s*(\{|\[)'
+                                matches = re.findall(simplified_pattern, self.content)
+                                for name, start_char in matches:
+                                    closing_tag = f'[/{name}]'
+                                    if closing_tag in self.content:
+                                        detected_tool_call = True
+                                        break
+                        
+                        # If we detected a tool call, buffer everything and suppress content
+                        if detected_tool_call:
+                            content_buffer += content
+                        elif expect_tools:
+                            # If tools are expected, temporarily buffer content to check for tool call patterns
+                            # But still send content if it's clearly not a tool call after a reasonable amount of text
+                            temp_check_content = content_buffer + content
+                            
+                            # Check if combined content contains tool call patterns
+                            if self._has_tool_use(temp_check_content):
+                                content_buffer += content
+                            else:
+                                # If it doesn't look like a tool call, send content immediately
+                                content_chunk = {
+                                    'id': self.response_id or self.chat_id,
+                                    'model': self.model,
+                                    'object': 'chat.completion.chunk',
+                                    'choices': [{
+                                        'index': 0,
+                                        'delta': {'content': content},
+                                        'finish_reason': None,
+                                    }],
+                                    'created': self.created,
+                                }
+                                yield f'data: {json.dumps(content_chunk)}\n\n'
+                        elif content:
+                            # No tools expected
                             content_chunk = {
                                 'id': self.response_id or self.chat_id,
                                 'model': self.model,
@@ -203,7 +253,7 @@ class QwenAiStreamHandler:
                                 'id': '',
                                 'model': self.model,
                                 'object': 'chat.completion.chunk',
-                                'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}],
+                                'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}],
                                 'created': self.created,
                             }
                             yield f'data: {json.dumps(initial_chunk)}\n\n'
@@ -211,27 +261,94 @@ class QwenAiStreamHandler:
                         
                         self.content += content
                         
-                        content_chunk = {
-                            'id': self.response_id or self.chat_id,
-                            'model': self.model,
-                            'object': 'chat.completion.chunk',
-                            'choices': [{
-                                'index': 0,
-                                'delta': {'content': content},
-                                'finish_reason': None,
-                            }],
-                            'created': self.created,
-                        }
-                        yield f'data: {json.dumps(content_chunk)}\n\n'
+                        # Check if we now have a tool call marker (standard or simplified format)
+                        if not detected_tool_call:
+                            if '[function_calls]' in self.content or '<tool_use>' in self.content:
+                                detected_tool_call = True
+                            else:
+                                # Check for simplified format: [tool_name]{...}[/tool_name]
+                                # We look for [name] followed by { or [ and ensure [/name] exists
+                                simplified_pattern = r'\[(\w+)\]\s*(\{|\[)'
+                                matches = re.findall(simplified_pattern, self.content)
+                                for name, start_char in matches:
+                                    closing_tag = f'[/{name}]'
+                                    if closing_tag in self.content:
+                                        detected_tool_call = True
+                                        break
+                        
+                        # If we detected a tool call, buffer everything and suppress content
+                        if detected_tool_call:
+                            content_buffer += content
+                        elif expect_tools:
+                            # If tools are expected, buffer everything
+                            content_buffer += content
+                        elif content:
+                            # No tools expected
+                            content_chunk = {
+                                'id': self.response_id or self.chat_id,
+                                'model': self.model,
+                                'object': 'chat.completion.chunk',
+                                'choices': [{
+                                    'index': 0,
+                                    'delta': {'content': content},
+                                    'finish_reason': None,
+                                }],
+                                'created': self.created,
+                            }
+                            yield f'data: {json.dumps(content_chunk)}\n\n'
                     
                     # Handle finished status
                     if status == 'finished' and (phase == 'answer' or phase is None):
-                        # Check for tool calls
-                        if self._has_tool_use(self.content):
+                        # If we detected a tool call, generate tool calls and suppress all content
+                        if detected_tool_call:
                             for chunk in self._generate_tool_calls():
                                 yield chunk
+
+                            # Yield final chunk with finish_reason for tool calls
+                            final_chunk = {
+                                'id': self.response_id or self.chat_id,
+                                'model': self.model,
+                                'object': 'chat.completion.chunk',
+                                'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}],
+                                'created': self.created,
+                            }
+                            yield f'data: {json.dumps(final_chunk)}\n\n'
+                            yield 'data: [DONE]\n\n'
+                            self._handle_completion(self.chat_id)
                             return
-                        
+
+                        # If we were buffering because tools were expected, check if it was actually a tool call
+                        if expect_tools and content_buffer:
+                            if self._has_tool_use(self.content):
+                                for chunk in self._generate_tool_calls():
+                                    yield chunk
+
+                                # Yield final chunk with finish_reason for tool calls
+                                final_chunk = {
+                                    'id': self.response_id or self.chat_id,
+                                    'model': self.model,
+                                    'object': 'chat.completion.chunk',
+                                    'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}],
+                                    'created': self.created,
+                                }
+                                yield f'data: {json.dumps(final_chunk)}\n\n'
+                                yield 'data: [DONE]\n\n'
+                                self._handle_completion(self.chat_id)
+                                return
+                            else:
+                                # Not a tool call, flush the buffer as content
+                                content_chunk = {
+                                    'id': self.response_id or self.chat_id,
+                                    'model': self.model,
+                                    'object': 'chat.completion.chunk',
+                                    'choices': [{
+                                        'index': 0,
+                                        'delta': {'content': content_buffer},
+                                        'finish_reason': None,
+                                    }],
+                                    'created': self.created,
+                                }
+                                yield f'data: {json.dumps(content_chunk)}\n\n'
                         finish_reason = delta.get('finish_reason', 'stop')
                         final_chunk = {
                             'id': self.response_id or self.chat_id,
@@ -253,20 +370,72 @@ class QwenAiStreamHandler:
             pass
         except Exception as e:
             print(f'[QwenAI] Stream error: {e}')
-        
-        # Send final chunk if stream ended unexpectedly
-        if not self.tool_calls_sent:
-            final_chunk = {
-                'id': self.response_id or self.chat_id,
-                'model': self.model,
-                'object': 'chat.completion.chunk',
-                'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
-                'created': self.created,
-            }
-            yield f'data: {json.dumps(final_chunk)}\n\n'
-            yield 'data: [DONE]\n\n'
-            
-            self._handle_completion(self.chat_id)
+        finally:
+            # Ensure we always send a finish reason and [DONE]
+            if not self.tool_calls_sent:
+                # If we detected a tool call, generate tool calls and suppress all content
+                if detected_tool_call:
+                    try:
+                        for chunk in self._generate_tool_calls():
+                            yield chunk
+                    except Exception as e:
+                        print(f'[QwenAI] Error generating tool calls: {e}')
+                    return
+                
+                # If we were buffering because tools were expected, check one last time
+                if expect_tools and content_buffer:
+                    if self._has_tool_use(self.content):
+                        try:
+                            for chunk in self._generate_tool_calls():
+                                yield chunk
+                        except Exception as e:
+                            print(f'[QwenAI] Error generating tool calls: {e}')
+                        return
+                    else:
+                        # Flush buffer as content
+                        if content_buffer:
+                            content_chunk = {
+                                'id': self.response_id or self.chat_id,
+                                'model': self.model,
+                                'object': 'chat.completion.chunk',
+                                'choices': [{
+                                    'index': 0,
+                                    'delta': {'content': content_buffer},
+                                    'finish_reason': None,
+                                }],
+                                'created': self.created,
+                            }
+                            yield f'data: {json.dumps(content_chunk)}\n\n'
+
+                # Fallback: if no tool calls were detected and no content was sent,
+                # ensure that any remaining content in self.content is returned
+                if not self.tool_calls_sent and not detected_tool_call and not content_buffer and self.content:
+                    # If we have content in self.content but didn't detect any tool calls,
+                    # we should send it as regular content
+                    content_chunk = {
+                        'id': self.response_id or self.chat_id,
+                        'model': self.model,
+                        'object': 'chat.completion.chunk',
+                        'choices': [{
+                            'index': 0,
+                            'delta': {'content': self.content},
+                            'finish_reason': 'stop',
+                        }],
+                        'created': self.created,
+                    }
+                    yield f'data: {json.dumps(content_chunk)}\n\n'
+
+                final_chunk = {
+                    'id': self.response_id or self.chat_id,
+                    'model': self.model,
+                    'object': 'chat.completion.chunk',
+                    'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
+                    'created': self.created,
+                }
+                yield f'data: {json.dumps(final_chunk)}\n\n'
+                yield 'data: [DONE]\n\n'
+
+                self._handle_completion(self.chat_id)
     
     def handle_non_stream(self, response) -> Dict[str, Any]:
         """Handle non-streaming response like Chat2API
@@ -359,13 +528,66 @@ class QwenAiStreamHandler:
         if final_reasoning:
             data['choices'][0]['message']['reasoning_content'] = final_reasoning
         
+        # Check for tool calls in content
+        content = data['choices'][0]['message']['content']
+        if self._has_tool_use(content):
+            tool_calls = self._parse_tool_use(content)
+            if tool_calls:
+                data['choices'][0]['message']['content'] = None
+                data['choices'][0]['message']['tool_calls'] = [
+                    {
+                        'id': tc['id'],
+                        'type': 'function',
+                        'function': {
+                            'name': tc['function']['name'],
+                            'arguments': tc['function']['arguments'],
+                        }
+                    } for tc in tool_calls
+                ]
+                data['choices'][0]['finish_reason'] = 'tool_calls'
+        # elif self._is_json_tool_call(content):
+        #     try:
+        #         json_data = json.loads(content.strip())
+        #         tool_name = json_data.get('name', '')
+        #         arguments = json_data.get('arguments', json_data.get('parameters', {}))
+        #         if isinstance(arguments, dict):
+        #             arguments = json.dumps(arguments)
+                
+        #         data['choices'][0]['message']['content'] = None
+        #         data['choices'][0]['message']['tool_calls'] = [{
+        #             'id': f'call_{int(time.time())}',
+        #             'type': 'function',
+        #             'function': {
+        #                 'name': tool_name,
+        #                 'arguments': arguments,
+        #             }
+        #         }]
+        #         data['choices'][0]['finish_reason'] = 'tool_calls'
+        #     except json.JSONDecodeError:
+        #         pass
+        
         self._handle_completion(self.chat_id)
         
         return data
     
     def _has_tool_use(self, content: str) -> bool:
         """Check if content contains tool use"""
-        return '[function_calls]' in content or '<tool_use>' in content
+        # Check for standard formats
+        if '[function_calls]' in content or '<tool_use>' in content:
+            return True
+        
+        # Check for simplified bracket format: [tool_name]{...}[/tool_name]
+        # We require the content inside to start with { or [ to be considered a tool call
+        # This prevents matching markdown links like [text](url) or random bracketed words
+        simplified_pattern = r'\[(\w+)\]\s*(\{|\[)'
+        matches = re.findall(simplified_pattern, content)
+        for name, start_char in matches:
+            # Ensure it has a closing tag
+            closing_tag = f'[/{name}]'
+            if closing_tag in content:
+                return True
+        
+        return False
     
     def _generate_tool_calls(self):
         """Generate tool calls chunks"""
@@ -412,46 +634,150 @@ class QwenAiStreamHandler:
             
             self._handle_completion(self.chat_id)
     
+    def _is_json_tool_call(self, content: str) -> bool:
+        """Check if content is a raw JSON tool call (Qwen native format)"""
+        content = content.strip()
+        if not content.startswith('{'):
+            return False
+        try:
+            data = json.loads(content)
+            return 'name' in data and ('arguments' in data or 'parameters' in data)
+        except json.JSONDecodeError:
+            return False
+
+    def _generate_json_tool_calls(self, content: str):
+        """Generate tool calls chunks from raw JSON content"""
+        try:
+            data = json.loads(content.strip())
+            tool_name = data.get('name', '')
+            # Qwen might use 'arguments' or 'parameters'
+            arguments = data.get('arguments', data.get('parameters', {}))
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments)
+            
+            self.tool_calls_sent = True
+            
+            # Send tool_calls delta
+            chunk = {
+                'id': self.response_id or self.chat_id,
+                'model': self.model,
+                'object': 'chat.completion.chunk',
+                'choices': [{
+                    'index': 0,
+                    'delta': {
+                        'tool_calls': [{
+                            'index': 0,
+                            'id': f'call_{int(time.time())}',
+                            'type': 'function',
+                            'function': {
+                                'name': tool_name,
+                                'arguments': arguments,
+                            },
+                        }],
+                    },
+                    'finish_reason': None,
+                }],
+                'created': self.created,
+            }
+            yield f'data: {json.dumps(chunk)}\n\n'
+            
+            # Send finish with tool_calls
+            finish_chunk = {
+                'id': self.response_id or self.chat_id,
+                'model': self.model,
+                'object': 'chat.completion.chunk',
+                'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}],
+                'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2},
+                'created': self.created,
+            }
+            yield f'data: {json.dumps(finish_chunk)}\n\n'
+            yield 'data: [DONE]\n\n'
+            
+            self._handle_completion(self.chat_id)
+        except json.JSONDecodeError:
+            pass
+
     def _parse_tool_use(self, content: str) -> Optional[list]:
         """Parse tool use from content"""
-        # Simple parser for tool calls
+        tool_calls = []
+        
+        # 1. Standard Format: [function_calls][call:name]{...}[/call][/function_calls]
         if '[function_calls]' in content:
-            # Parse bracket format: [function_calls][call:name]{"arg": "value"}[/call][/function_calls]
-            pattern = r'\[call:(\w+)\](\{[^\}]+\})\[/call\]'
-            matches = re.findall(pattern, content)
-            if matches:
-                tool_calls = []
-                for i, (name, args) in enumerate(matches):
-                    try:
-                        tool_calls.append({
-                            'id': f'tool_{i}',
-                            'function': {
-                                'name': name,
-                                'arguments': args
-                            }
-                        })
-                    except json.JSONDecodeError:
-                        continue
-                return tool_calls
-        elif '<tool_use>' in content:
-            # Parse XML format: <tool_use><name>name</name><arguments>...</arguments></tool_use>
-            pattern = r'<tool_use>.*?<name>([^<]+)</name>.*?<arguments>([^<]+)</arguments>.*?</tool_use>'
+            # Use DOTALL to match across newlines
+            pattern = r'\[call:(\w+)\](.*?)\[/call\]'
             matches = re.findall(pattern, content, re.DOTALL)
-            if matches:
-                tool_calls = []
-                for i, (name, args) in enumerate(matches):
-                    try:
-                        tool_calls.append({
-                            'id': f'tool_{i}',
-                            'function': {
-                                'name': name.strip(),
-                                'arguments': args.strip()
-                            }
-                        })
-                    except json.JSONDecodeError:
-                        continue
+            for name, args_str in matches:
+                # Clean up the args string - it might contain newlines or extra whitespace
+                args_clean = args_str.strip()
+                try:
+                    # Validate JSON
+                    json.loads(args_clean)
+                    tool_calls.append({
+                        'id': f'tool_{len(tool_calls)}',
+                        'function': {
+                            'name': name,
+                            'arguments': args_clean
+                        }
+                    })
+                except json.JSONDecodeError:
+                    # If it's not valid JSON, it might be a partial stream or malformed
+                    # We can try to extract JSON if it's embedded in text, but for now skip
+                    continue
+            if tool_calls:
                 return tool_calls
-        return None
+
+        # 2. XML Format: <tool_use><name>name</name><arguments>...</arguments></tool_use>
+        if '<tool_use>' in content:
+            pattern = r'<tool_use>.*?<name>([^<]+)</name>.*?<arguments>(.*?)</arguments>.*?</tool_use>'
+            matches = re.findall(pattern, content, re.DOTALL)
+            for name, args_str in matches:
+                args_clean = args_str.strip()
+                try:
+                    json.loads(args_clean)
+                    tool_calls.append({
+                        'id': f'tool_{len(tool_calls)}',
+                        'function': {
+                            'name': name.strip(),
+                            'arguments': args_clean
+                        }
+                    })
+                except json.JSONDecodeError:
+                    continue
+            if tool_calls:
+                return tool_calls
+        
+        # 3. Simplified Format: [tool_name]{...}[/tool_name]
+        # We only match if the content inside is a JSON object or array to avoid false positives
+        # like markdown links [text](url) or natural language [word].
+        # Updated regex to be more precise and handle potential whitespace/newlines better
+        # Removed $ anchor to allow matching in multi-line streams
+        simplified_pattern = r'\[(\w+)\]\s*(\{.*?\}|\[.*?\])\s*\[/\1\]'
+        matches = re.findall(simplified_pattern, content, re.DOTALL)
+        
+        for name, args_str in matches:
+            # Skip standard tags we already handled
+            if name.lower() in ['function_calls', 'call']:
+                continue
+                
+            args_clean = args_str.strip()
+            try:
+                # Validate JSON
+                parsed_json = json.loads(args_clean)
+                # Ensure it's a dict or list (valid tool args)
+                if isinstance(parsed_json, (dict, list)):
+                    tool_calls.append({
+                        'id': f'tool_{len(tool_calls)}',
+                        'function': {
+                            'name': name,
+                            'arguments': args_clean
+                        }
+                    })
+            except json.JSONDecodeError:
+                # If it looks like a tool call but isn't valid JSON, skip it
+                # This prevents crashes on malformed content
+                continue
+                    
+        return tool_calls if tool_calls else None
     
     def get_chat_id(self) -> str:
         """Get chat ID"""

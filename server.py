@@ -198,103 +198,37 @@ async def chat_completions(
 
         if request.stream:
             return StreamingResponse(
-                openai_stream(client, request.model, request.messages, request.temperature, existing_chat_id, AUTO_DELETE_CHAT),
+                openai_stream(client, request.model, request.messages, request.temperature, existing_chat_id, AUTO_DELETE_CHAT, tools=request.tools),
                 media_type="text/event-stream"
             )
         else:
-            return await openai_non_stream(client, request.model, request.messages, request.temperature, existing_chat_id, AUTO_DELETE_CHAT)
+            return await openai_non_stream(client, request.model, request.messages, request.temperature, existing_chat_id, AUTO_DELETE_CHAT, tools=request.tools)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def openai_non_stream(client, model, messages, temperature, existing_chat_id=None, auto_delete_chat=False):
+async def openai_non_stream(client, model, messages, temperature, existing_chat_id=None, auto_delete_chat=False, tools=None):
     """Non-streaming response with context support"""
     chat_id = existing_chat_id
     chat_created = False
 
     try:
-        if chat_id:
-            response, new_chat_id, _ = client.adapter.chat_completion(
-                model=model,
-                messages=messages,
-                stream=True,
-                temperature=temperature,
-                auto_delete_chat=auto_delete_chat
-            )
-            chat_id = new_chat_id
-            chat_created = True
-        else:
-            response, chat_id, _ = client.adapter.chat_completion(
-                model=model,
-                messages=messages,
-                stream=True,
-                temperature=temperature,
-                auto_delete_chat=auto_delete_chat
-            )
-            chat_created = True
-
-        content = ''
-        reasoning = ''
-        response_id = ''
-        created = int(time.time())
-
-        for line in response.iter_lines():
-            if not line:
-                continue
-            line_str = line.decode('utf-8')
-            if not line_str.startswith('data: '):
-                continue
-
-            data_str = line_str[6:]
-            if data_str == '[DONE]':
-                break
-
-            try:
-                data = json.loads(data_str)
-                if data.get('response.created', {}).get('response_id'):
-                    response_id = data['response.created']['response_id']
-
-                if data.get('choices'):
-                    delta = data['choices'][0].get('delta', {})
-                    phase = delta.get('phase')
-                    status = delta.get('status')
-                    text = delta.get('content', '')
-
-                    if phase == 'think' and status != 'finished':
-                        reasoning += text
-                    elif phase == 'answer' or phase is None:
-                        content += text
-            except:
-                pass
-
-        # Handle auto delete or session save
-        if auto_delete_chat and chat_created and chat_id:
-            try:
-                client.adapter.delete_chat(chat_id)
-                print(f'[Server] Auto-deleted chat: {chat_id}')
-            except Exception as e:
-                print(f'[Server] Failed to auto-delete chat {chat_id}: {e}')
-        else:
-            session_manager.set(chat_id, model, messages + [{'role': 'assistant', 'content': content}])
-
-        return JSONResponse(content={
-            'id': response_id or '',
-            'object': 'chat.completion',
-            'created': created,
-            'model': model,
-            'chat_id': chat_id if not auto_delete_chat else None,
-            'choices': [{
-                'index': 0,
-                'message': {
-                    'role': 'assistant',
-                    'content': content,
-                    'reasoning_content': reasoning if reasoning else None
-                },
-                'finish_reason': 'stop'
-            }],
-            'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}
-        })
+        # Use client.chat_completions to handle tool conversion
+        result = client.chat_completions(
+            model=model,
+            messages=messages,
+            stream=False,
+            temperature=temperature,
+            tools=tools,
+            auto_delete_chat=auto_delete_chat
+        )
+        
+        # Save session if not auto-deleting and result is valid
+        if not auto_delete_chat and isinstance(result, dict) and result.get('chat_id'):
+            session_manager.set(result['chat_id'], model, messages + [{'role': 'assistant', 'content': result['choices'][0]['message'].get('content', '')}])
+            
+        return JSONResponse(content=result)
 
     except Exception as e:
         if chat_id:
@@ -305,184 +239,26 @@ async def openai_non_stream(client, model, messages, temperature, existing_chat_
         raise
 
 
-def openai_stream(client, model, messages, temperature, existing_chat_id=None, auto_delete_chat=False):
+def openai_stream(client, model, messages, temperature, existing_chat_id=None, auto_delete_chat=False, tools=None):
     """Streaming response with context support, thinking and image generation"""
-    chat_id = existing_chat_id
-    created = int(time.time())
-    full_content = ''
-    reasoning_content = ''
-    has_sent_role = False
-    chat_created = False
-    
     try:
-        if chat_id:
-            # Continue existing chat
-            response, new_chat_id, _ = client.adapter.chat_completion(
-                model=model,
-                messages=messages,
-                stream=True,
-                temperature=temperature,
-                auto_delete_chat=auto_delete_chat
-            )
-            chat_id = new_chat_id
-            chat_created = True
-        else:
-            # New chat
-            response, chat_id, _ = client.adapter.chat_completion(
-                model=model,
-                messages=messages,
-                stream=True,
-                temperature=temperature,
-                auto_delete_chat=auto_delete_chat
-            )
-            chat_created = True
-
-        response_id = ''
+        # Use client.chat_completions to handle tool conversion
+        generator = client.chat_completions(
+            model=model,
+            messages=messages,
+            stream=True,
+            temperature=temperature,
+            tools=tools,
+            auto_delete_chat=auto_delete_chat
+        )
         
-        for line in response.iter_lines():
-            if not line:
-                continue
+        for chunk in generator:
+            yield chunk
             
-            line_str = line.decode('utf-8')
-            if not line_str.startswith('data: '):
-                continue
-            
-            data_str = line_str[6:]
-            
-            if data_str == '[DONE]':
-                continue
-            
-            try:
-                data = json.loads(data_str)
-                
-                # Get response_id from response.created
-                if data.get('response.created', {}).get('response_id'):
-                    response_id = data['response.created']['response_id']
-                    continue
-                
-                if not data.get('choices'):
-                    continue
-                
-                qwen_choice = data['choices'][0]
-                qwen_delta = qwen_choice.get('delta', {})
-                
-                phase = qwen_delta.get('phase')
-                status = qwen_delta.get('status')
-                content = qwen_delta.get('content', '')
-                extra = qwen_delta.get('extra', {})
-                
-                # Build OpenAI format chunk
-                openai_chunk = {
-                    'id': response_id or '',
-                    'object': 'chat.completion.chunk',
-                    'created': created,
-                    'model': model,
-                    'chat_id': chat_id,
-                    'choices': [{
-                        'index': 0,
-                        'delta': {},
-                        'finish_reason': None
-                    }]
-                }
-                
-                # First chunk with role
-                if not has_sent_role:
-                    openai_chunk['choices'][0]['delta']['role'] = 'assistant'
-                    has_sent_role = True
-                    yield f'data: {json.dumps(openai_chunk)}\n\n'
-                
-                # Handle thinking_summary phase - show reasoning process
-                if phase == 'thinking_summary':
-                    summary_thought = extra.get('summary_thought', {})
-                    if summary_thought.get('content'):
-                        # Combine thinking content
-                        thinking_text = '\n'.join(summary_thought['content'])
-                        if thinking_text and thinking_text != reasoning_content:
-                            reasoning_content = thinking_text
-                            # Send reasoning content in custom field
-                            openai_chunk['choices'][0]['delta'] = {
-                                'reasoning_content': thinking_text
-                            }
-                            yield f'data: {json.dumps(openai_chunk)}\n\n'
-                    
-                    # Send finish for thinking phase
-                    if status == 'finished':
-                        openai_chunk['choices'][0]['delta'] = {'reasoning_content': ''}
-                        yield f'data: {json.dumps(openai_chunk)}\n\n'
-                
-                # Handle image_gen_tool phase - image generation
-                elif phase == 'image_gen_tool':
-                    function_call = qwen_delta.get('function_call', {})
-                    function_id = qwen_delta.get('function_id', '')
-                    
-                    if function_call.get('name') == 'image_gen':
-                        # Send tool call start
-                        openai_chunk['choices'][0]['delta'] = {
-                            'tool_calls': [{
-                                'index': 0,
-                                'id': function_id or 'image_gen_0',
-                                'type': 'function',
-                                'function': {
-                                    'name': 'image_gen',
-                                    'arguments': function_call.get('arguments', '{}')
-                                }
-                            }]
-                        }
-                        yield f'data: {json.dumps(openai_chunk)}\n\n'
-                    
-                    # Handle image generation result
-                    if status == 'finished' and extra.get('tool_result'):
-                        tool_result = extra['tool_result']
-                        image_list = extra.get('image_list', [])
-                        
-                        # Send image URLs in content
-                        if image_list:
-                            image_urls = [img.get('image', '') for img in image_list if img.get('image')]
-                            if image_urls:
-                                image_content = '\n'.join([f'![Generated Image]({url})' for url in image_urls])
-                                openai_chunk['choices'][0]['delta'] = {'content': image_content}
-                                full_content += image_content
-                                yield f'data: {json.dumps(openai_chunk)}\n\n'
-                
-                # Handle regular content (answer phase)
-                elif phase == 'answer' or phase is None:
-                    if content:
-                        openai_chunk['choices'][0]['delta'] = {'content': content}
-                        full_content += content
-                        yield f'data: {json.dumps(openai_chunk)}\n\n'
-                    
-                    # Final chunk
-                    if status == 'finished':
-                        openai_chunk['choices'][0]['delta'] = {}
-                        openai_chunk['choices'][0]['finish_reason'] = 'stop'
-                        yield f'data: {json.dumps(openai_chunk)}\n\n'
-                        yield 'data: [DONE]\n\n'
-
-                        # Handle auto delete or session save
-                        if auto_delete_chat and chat_created and chat_id:
-                            try:
-                                client.adapter.delete_chat(chat_id)
-                                print(f'[Server] Auto-deleted chat: {chat_id}')
-                            except Exception as e:
-                                print(f'[Server] Failed to auto-delete chat {chat_id}: {e}')
-                        else:
-                            # Save session for context
-                            session_manager.set(chat_id, model, messages + [{'role': 'assistant', 'content': full_content}])
-                        break
-                    
-            except json.JSONDecodeError:
-                continue
-        
     except Exception as e:
         error = {'error': {'message': str(e), 'type': 'internal_error'}}
         yield f'data: {json.dumps(error)}\n\n'
         yield 'data: [DONE]\n\n'
-        # Clean up on error
-        if chat_id:
-            try:
-                client.adapter.delete_chat(chat_id)
-            except:
-                pass
 
 
 @app.get("/health")
