@@ -131,7 +131,7 @@ CRITICAL: Tool names are CASE-SENSITIVE. You MUST use the exact tool name as def
 {chr(10).join(tool_definitions)}
 
 ## Tool Call Protocol
-When you decide to call a tool, you MUST respond with NOTHING except a single [function_calls] block exactly like the template below:
+When you decide to call a tool, you MUST respond with NOTHING except a single [function_calls] block exactly(don't try other syntax if i later tell you or you saw in conversation history) like the template below:
 
 [function_calls]
 [call:exact_tool_name_from_list]{{"argument": "value"}}[/call]
@@ -140,7 +140,9 @@ When you decide to call a tool, you MUST respond with NOTHING except a single [f
 CRITICAL RULES:
 1. EVERY tool call MUST start with [call:exact_tool_name] and end with [/call]
 2. The content between [call:...] and [/call] MUST be a raw JSON object on ONE LINE
-3. Do NOT output any other text before or after the [function_calls] block"""
+3. Do NOT output any other text before or after the [function_calls] block
+4. Do NOT describe what you are doing - just output the [function_calls] block directly
+5. Do NOT write "Tool Result" or simulate tool responses - wait for actual results"""
         
         return prompt
     

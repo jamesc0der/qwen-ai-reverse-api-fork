@@ -116,8 +116,8 @@ class QwenAiAdapter:
         payload = {
             'title': title,
             'models': [model_id],
-            'chat_mode': 'normal',
-            # 'chat_mode': 'local',
+            # 'chat_mode': 'normal',
+            'chat_mode': 'local',
             'chat_type': 't2t',
             'timestamp': int(time.time() * 1000),
             'project_id': '',

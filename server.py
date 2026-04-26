@@ -253,7 +253,8 @@ def openai_stream(client, model, messages, temperature, existing_chat_id=None, a
         )
         
         for chunk in generator:
-            yield chunk
+            if chunk is not None:  # ← ADD THIS GUARD
+                yield chunk
             
     except Exception as e:
         error = {'error': {'message': str(e), 'type': 'internal_error'}}
