@@ -54,9 +54,15 @@ class QwenAiStreamHandler:
         if self.tools:
             tool_names = {t.get('function', {}).get('name', '') for t in self.tools}
 
-        if '[function_calls]' in clean:
-            if not tool_names or any(f'[call:{n}]' in clean for n in tool_names):
-                return clean.find('[function_calls]')
+        if '[function_calls]' in clean or '[function_call]' in clean:
+            marker = '[function_calls]' if '[function_calls]' in clean else '[function_call]'
+            if tool_names:
+                if any(f'[call:{n}]' in clean for n in tool_names):
+                    return clean.find(marker)
+                if any(f'[{n}]' in clean for n in tool_names):
+                    return clean.find(marker)
+            else:
+                return clean.find(marker)
 
         if '<tool_use>' in clean:
             if not tool_names or any(f'<n>{n}</n>' in clean for n in tool_names):
@@ -67,7 +73,10 @@ class QwenAiStreamHandler:
             for name in tool_names:
                 tag = f'[{name}]'
                 idx = clean.find(tag)
-                if idx != -1 and f'[/{name}]' in clean[idx:]:
+                if idx == -1:
+                    continue
+                # Accept exact or mismatched closing tag
+                if f'[/{name}]' in clean[idx:] or re.search(r'\[/\w+\]', clean[idx:]):
                     earliest = min(earliest, idx)
             return earliest
 
@@ -426,7 +435,7 @@ class QwenAiStreamHandler:
         if self.tools:
             tool_names = {t.get('function', {}).get('name', '') for t in self.tools}
 
-        if '[function_calls]' in clean:
+        if '[function_calls]' in clean or '[function_call]' in clean:
             # Only count it if there's a [call:known_tool] inside
             if tool_names:
                 if any(f'[call:{n}]' in clean for n in tool_names):
@@ -444,7 +453,14 @@ class QwenAiStreamHandler:
         # Simplified/nested tag format — only match known tool names
         if tool_names:
             for name in tool_names:
-                if f'[{name}]' in clean and f'[/{name}]' in clean:
+                if f'[{name}]' not in clean:
+                    continue
+                # Accept exact closing tag OR any closing tag after opening
+                if f'[/{name}]' in clean:
+                    return True
+                # Mismatched closing tag fallback (e.g. [/todo] for [todo_write])
+                idx = clean.find(f'[{name}]')
+                if idx != -1 and re.search(r'\[/\w+\]', clean[idx:]):
                     return True
         
         return False
@@ -618,11 +634,11 @@ class QwenAiStreamHandler:
 
     def _parse_tool_use(self, content: str) -> Optional[list]:
         """Parse tool use from content. Strips code spans first."""
-        content = self._strip_code_spans(content)
+        # content = self._strip_code_spans(content)
         tool_calls = []
 
         # 1. Standard Format: [function_calls][call:name]{...}[/call][/function_calls]
-        if '[function_calls]' in content:
+        if '[function_calls]' in content or '[function_call]' in content:
             for match in re.finditer(r'\[call:(\w+)\]', content):
                 name = match.group(1)
                 json_start = content.find('{', match.end())
@@ -662,7 +678,7 @@ class QwenAiStreamHandler:
                 return tool_calls
 
         # 3. Simplified / Nested-tag Format
-        SKIP_NAMES = {'function_calls', 'call'}
+        SKIP_NAMES = {'function_calls', 'function_call', 'call'}
 
         for match in re.finditer(r'\[(\w+)\]', content):
             name = match.group(1)
@@ -713,16 +729,56 @@ class QwenAiStreamHandler:
                     continue
 
                 params: dict = {}
-                for sub in re.finditer(r'\[(\w+)\](.*?)\[/\1\]', inner, re.DOTALL):
-                    sub_name = sub.group(1)
-                    sub_val = sub.group(2).strip()
+                pos = 0
+                while pos < len(inner):
+                    # Find next opening tag [name]
+                    open_match = re.search(r'\[(\w+)\]', inner[pos:])
+                    if not open_match:
+                        break
+                    sub_name = open_match.group(1)
+                    content_start = pos + open_match.end()
+                    
+                    # Find the LAST occurrence of [/name] (not first) to handle nested content
+                    close_tag = f'[/{sub_name}]'
+                    # Search from content_start forward
+                    close_pos = inner.find(close_tag, content_start)
+                    if close_pos == -1:
+                        break
+                    
+                    raw_val = inner[content_start:close_pos]
+                    # Trim only single wrapping newline from tag formatting
+                    if raw_val.startswith('\n'):
+                        raw_val = raw_val[1:]
+                    if raw_val.endswith('\n'):
+                        raw_val = raw_val[:-1]
+                    
                     try:
-                        params[sub_name] = json.loads(sub_val)
+                        params[sub_name] = json.loads(raw_val)
                     except (json.JSONDecodeError, ValueError):
-                        params[sub_name] = sub_val
+                        params[sub_name] = raw_val  # exact string, no strip
+                    
+                    pos = close_pos + len(close_tag)
 
                 if params:
                     tool_calls.append({
+                        'id': f'tool_{len(tool_calls)}',
+                        'function': {'name': name, 'arguments': json.dumps(params)}
+                    })
+
+        seen = set()
+        unique_calls = []
+        for tc in tool_calls:
+            key = (tc['function']['name'], tc['function']['arguments'])
+            if key not in seen:
+                seen.add(key)
+                unique_calls.append(tc)
+        return unique_calls if unique_calls else None
+
+    def get_chat_id(self) -> str:
+        return self.chat_id
+    
+    def get_response_id(self) -> str:
+        return self.response_idppend({
                         'id': f'tool_{len(tool_calls)}',
                         'function': {'name': name, 'arguments': json.dumps(params)}
                     })
