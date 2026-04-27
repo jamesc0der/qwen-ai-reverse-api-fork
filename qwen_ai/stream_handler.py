@@ -54,12 +54,12 @@ class QwenAiStreamHandler:
         if self.tools:
             tool_names = {t.get('function', {}).get('name', '') for t in self.tools}
 
-        if '[function_calls]' in clean or '[function_call]' in clean:
-            marker = '[function_calls]' if '[function_calls]' in clean else '[function_call]'
+        if '<function_calls>' in clean or '<function_call>' in clean:
+            marker = '<function_calls>' if '<function_calls>' in clean else '<function_call>'
             if tool_names:
-                if any(f'[call:{n}]' in clean for n in tool_names):
+                if any(f'<call:{n}>' in clean for n in tool_names):
                     return clean.find(marker)
-                if any(f'[{n}]' in clean for n in tool_names):
+                if any(f'<{n}>' in clean for n in tool_names):
                     return clean.find(marker)
             else:
                 return clean.find(marker)
@@ -71,12 +71,12 @@ class QwenAiStreamHandler:
         if tool_names:
             earliest = len(content)
             for name in tool_names:
-                tag = f'[{name}]'
+                tag = f'<{name}>'
                 idx = clean.find(tag)
                 if idx == -1:
                     continue
                 # Accept exact or mismatched closing tag
-                if f'[/{name}]' in clean[idx:] or re.search(r'\[/\w+\]', clean[idx:]):
+                if f'</{name}>' in clean[idx:] or re.search(r'\</\w+\>', clean[idx:]):
                     earliest = min(earliest, idx)
             return earliest
 
@@ -99,7 +99,7 @@ class QwenAiStreamHandler:
     def _strip_injected_history(self, content: str) -> str:
         """Remove tool results and conversation history that Qwen echoes back in its response."""
         # Remove Tool Result blocks: "Tool Result [id]: ...text..." up to next blank line or tool call
-        content = re.sub(r'Tool Result \[[^\]]*\]:.*?(?=\n\n|\[function_calls\]|\[function_call\]|$)', 
+        content = re.sub(r'Tool Result \<[^\>]*\>:.*?(?=\n\n|\<function_calls\>|\<function_call\>|$)', 
                         '', content, flags=re.DOTALL)
         
         # Remove "User: ..." and "Assistant: ..." prefixes that get echoed
@@ -452,10 +452,10 @@ class QwenAiStreamHandler:
         if self.tools:
             tool_names = {t.get('function', {}).get('name', '') for t in self.tools}
 
-        if '[function_calls]' in clean or '[function_call]' in clean:
-            # Only count it if there's a [call:known_tool] inside
+        if '<function_calls>' in clean or '<function_call>' in clean:
+            # Only count it if there's a <call:known_tool> inside
             if tool_names:
-                if any(f'[call:{n}]' in clean for n in tool_names):
+                if any(f'<call:{n}>' in clean for n in tool_names):
                     return True
             else:
                 return True
@@ -470,16 +470,23 @@ class QwenAiStreamHandler:
         # Simplified/nested tag format — only match known tool names
         if tool_names:
             for name in tool_names:
-                if f'[{name}]' not in clean:
+                if f'<{name}>' not in clean:
                     continue
                 # Accept exact closing tag OR any closing tag after opening
-                if f'[/{name}]' in clean:
+                if f'</{name}>' in clean:
                     return True
-                # Mismatched closing tag fallback (e.g. [/todo] for [todo_write])
-                idx = clean.find(f'[{name}]')
-                if idx != -1 and re.search(r'\[/\w+\]', clean[idx:]):
+                # Mismatched closing tag fallback (e.g. </todo> for <todo_write>)
+                idx = clean.find(f'<{name}>')
+                if idx != -1 and re.search(r'\</\w+\>', clean[idx:]):
                     return True
-        
+
+        # Check for XML attribute format: <tag_name attr="value"></tag_name>
+        attr_pattern = r'\<(\w+)\s+([^>]*)\>\s*\</\1\>'
+        for match in re.finditer(attr_pattern, clean):
+            name = match.group(1)
+            if name in tool_names or not tool_names:
+                return True
+
         return False
 
     def _generate_tool_calls(self):
@@ -613,8 +620,8 @@ class QwenAiStreamHandler:
         opener = content[start]
         if opener == '{':
             closer = '}'
-        elif opener == '[':
-            closer = ']'
+        elif opener == '<':
+            closer = '>'
         else:
             return None
 
@@ -654,9 +661,9 @@ class QwenAiStreamHandler:
         # content = self._strip_code_spans(content)
         tool_calls = []
 
-        # 1. Standard Format: [function_calls][call:name]{...}[/call][/function_calls]
-        if '[function_calls]' in content or '[function_call]' in content:
-            for match in re.finditer(r'\[call:(\w+)\]', content):
+        # 1. Standard Format: <function_calls><call:name>{...}</call></function_calls>
+        if '<function_calls>' in content or '<function_call>' in content:
+            for match in re.finditer(r'\<call:(\w+)\>', content):
                 name = match.group(1)
                 json_start = content.find('{', match.end())
                 if json_start == -1:
@@ -697,15 +704,15 @@ class QwenAiStreamHandler:
         # 3. Simplified / Nested-tag Format
         SKIP_NAMES = {'function_calls', 'function_call', 'call'}
 
-        for match in re.finditer(r'\[(\w+)\]', content):
+        for match in re.finditer(r'\<(\w+)\>', content):
             name = match.group(1)
             if name.lower() in SKIP_NAMES:
                 continue
 
-            closing_tag = f'[/{name}]'
-            # Also accept mismatched closing like [/todo] for [todo_write]
+            closing_tag = f'</{name}>'
+            # Also accept mismatched closing like </todo> for <todo_write>
             has_exact_close = closing_tag in content[match.end():]
-            has_any_close = bool(re.search(r'\[/\w+\]', content[match.end():]))
+            has_any_close = bool(re.search(r'\</\w+\>', content[match.end():]))
             if not has_exact_close and not has_any_close:
                 continue
 
@@ -719,7 +726,7 @@ class QwenAiStreamHandler:
             next_char = content[json_start]
 
             if next_char == '{':
-                # Sub-format a: JSON object inline [tool_name]{...}[/tool_name]
+                # Sub-format a: JSON object inline <tool_name>{...}</tool_name>
                 peek = content[json_start + 1:].lstrip()
                 if not (peek.startswith('"') or peek.startswith('}')):
                     continue
@@ -736,27 +743,27 @@ class QwenAiStreamHandler:
                 except json.JSONDecodeError:
                     continue
 
-            elif next_char == '[':
-                # Sub-format b: nested sub-tags [tool_name][param]val[/param][/tool_name]
+            elif next_char == '<':
+                # Sub-format b: nested sub-tags <tool_name><param>val</param></tool_name>
                 close_pos = content.find(closing_tag, match.end())
                 if close_pos == -1:
                     continue
                 inner = content[match.end():close_pos]
-                if not inner.lstrip().startswith('['):
+                if not inner.lstrip().startswith('<'):
                     continue
 
                 params: dict = {}
                 pos = 0
                 while pos < len(inner):
-                    # Find next opening tag [name]
-                    open_match = re.search(r'\[(\w+)\]', inner[pos:])
+                    # Find next opening tag <name>
+                    open_match = re.search(r'\<(\w+)\>', inner[pos:])
                     if not open_match:
                         break
                     sub_name = open_match.group(1)
                     content_start = pos + open_match.end()
                     
-                    # Find the LAST occurrence of [/name] (not first) to handle nested content
-                    close_tag = f'[/{sub_name}]'
+                    # Find the LAST occurrence of </name> (not first) to handle nested content
+                    close_tag = f'</{sub_name}>'
                     # Search from content_start forward
                     close_pos = inner.find(close_tag, content_start)
                     if close_pos == -1:
@@ -780,6 +787,22 @@ class QwenAiStreamHandler:
                     tool_calls.append({
                         'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
                         'function': {'name': name, 'arguments': json.dumps(params)}
+                    })
+
+        # 4. XML Attribute Format: <tag_name attr="value"></tag_name>
+        if not tool_calls:
+            attr_pattern = r'\<(\w+)\s+([^>]*)\>\s*\</\1\>'
+            for match in re.finditer(attr_pattern, content):
+                name = match.group(1)
+                attrs_str = match.group(2)
+                # Parse attributes like plan="value"
+                attr_dict = {}
+                for attr_match in re.finditer(r'(\w+)="([^"]*)"', attrs_str):
+                    attr_dict[attr_match.group(1)] = attr_match.group(2)
+                if attr_dict:
+                    tool_calls.append({
+                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
+                        'function': {'name': name, 'arguments': json.dumps(attr_dict)}
                     })
 
         seen = set()

@@ -275,6 +275,32 @@ class QwenAiStreamHandler:
 }
 ```
 
+### 3.5. `qwen_ai/tool_parser.py` - Tool Call Parsing
+
+Supports multiple XML-based tool call formats used by Qwen AI:
+
+```python
+class ToolParser:
+    @staticmethod
+    def has_tool_use(content: str) -> bool
+    @staticmethod
+    def parse_tool_use(content: str) -> Optional[List[Dict]]
+    @staticmethod
+    def tools_to_system_prompt(tools: List[Dict]) -> str
+```
+
+**Supported Formats:**
+1. **Standard XML:** `<function_calls><call:tool_name>{"arg": "value"}</call></function_calls>`
+2. **Tool Use XML:** `<tool_use><n>tool_name</n><arguments>{"arg": "value"}</arguments></tool_use>`
+3. **Simplified JSON:** `<tool_name>{"arg": "value"}</tool_name>`
+4. **Nested Tags:** `<tool_name><param>value</param></tool_name>`
+5. **XML Attributes:** `<tool_name attr="value"></tool_name>` *(new)*
+
+**Example Attribute Format:**
+```xml
+<exit_plan_mode plan="Exit plan mode as requested by user"></exit_plan_mode>
+```
+
 ### 4. `qwen_ai/vless_proxy.py` - Vless Protocol Implementation
 
 ```python
