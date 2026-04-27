@@ -1,6 +1,6 @@
-"""节点存储模块 - 本地持久化存储可用节点
+"""Node storage module - Local persistent storage available nodes
 
-支持JSON文件存储，自动加载和保存
+Supports JSON file storage, with automatic loading and saving.
 """
 
 import json
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class NodeStorage:
-    """节点存储管理器"""
+    """Node Storage Manager"""
     
     DEFAULT_STORAGE_FILE = "vless_nodes.json"
     
@@ -29,7 +29,7 @@ class NodeStorage:
         self._dirty = False
     
     async def load(self) -> Dict[str, VlessNode]:
-        """从文件加载节点"""
+        """Load nodes from files"""
         async with self._lock:
             if not os.path.exists(self.storage_file):
                 logger.info(f"Storage file {self.storage_file} not found, starting with empty cache")
@@ -59,20 +59,20 @@ class NodeStorage:
     
     async def save(self, nodes: Optional[Dict[str, VlessNode]] = None, force: bool = False):
         """
-        保存节点到文件
+        Save node to file
         
         Args:
-            nodes: 要保存的节点，为None则保存缓存
-            force: 是否强制保存（忽略脏标记）
+            nodes: The nodes to be saved; if None, save as cache.
+            force: Whether to force a save (ignore dirty tags)
         """
         async with self._lock:
             if nodes is not None:
                 self._cache = nodes
             
             if not force and not self._dirty:
-                # 检查自动保存间隔
+                # Check the automatic save interval
                 elapsed = (datetime.now() - self._last_save).total_seconds()
-                if elapsed < 60:  # 至少60秒保存一次
+                if elapsed < 60: # Save at least once every 60 seconds
                     return
             
             try:
@@ -85,12 +85,12 @@ class NodeStorage:
                     }
                 }
                 
-                # 先写入临时文件，然后原子替换
+                # First write to a temporary file, then perform an atomic replacement.
                 temp_file = self.storage_file + '.tmp'
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 
-                # 原子替换
+                # Atomic Substitution
                 if os.path.exists(self.storage_file):
                     os.replace(temp_file, self.storage_file)
                 else:
@@ -104,7 +104,7 @@ class NodeStorage:
                 logger.error(f"Failed to save storage file: {e}")
     
     async def update_node(self, node: VlessNode, auto_save: bool = True):
-        """更新单个节点"""
+        """Update a single node"""
         async with self._lock:
             self._cache[node.identifier] = node
             self._dirty = True
@@ -113,10 +113,10 @@ class NodeStorage:
             await self.save()
     
     async def update_nodes(self, nodes: List[VlessNode], auto_save: bool = True):
-        """批量更新节点"""
+        "Batch update nodes"
         async with self._lock:
             for node in nodes:
-                # 保留已有节点的状态
+                # Preserve the state of existing nodes
                 if node.identifier in self._cache:
                     existing = self._cache[node.identifier]
                     node.is_available = existing.is_available
@@ -132,7 +132,7 @@ class NodeStorage:
             await self.save()
     
     async def mark_node_result(self, identifier: str, success: bool, latency: float = 0, auto_save: bool = True):
-        """标记节点使用结果"""
+        """Results of tagging nodes"""
         async with self._lock:
             if identifier in self._cache:
                 node = self._cache[identifier]
@@ -146,19 +146,19 @@ class NodeStorage:
             await self.save()
     
     def get_node(self, identifier: str) -> Optional[VlessNode]:
-        """获取单个节点"""
+        """Get a single node"""
         return self._cache.get(identifier)
     
     def get_all_nodes(self) -> Dict[str, VlessNode]:
-        """获取所有节点"""
+        """Get all nodes"""
         return self._cache.copy()
     
     def get_available_nodes(self) -> List[VlessNode]:
-        """获取所有可用节点"""
+        """Get all available nodes."""
         return [n for n in self._cache.values() if n.is_available]
     
     def get_nodes_by_pattern(self, pattern: str) -> List[VlessNode]:
-        """按名称模式获取节点"""
+        """Retrieve nodes by name pattern"""
         import re
         return [
             n for n in self._cache.values()
@@ -166,7 +166,7 @@ class NodeStorage:
         ]
     
     async def remove_node(self, identifier: str, auto_save: bool = True):
-        """移除节点"""
+        """Remove Node"""
         async with self._lock:
             if identifier in self._cache:
                 del self._cache[identifier]
@@ -177,20 +177,20 @@ class NodeStorage:
     
     async def clean_expired(self, max_age_days: int = 7, auto_save: bool = True) -> int:
         """
-        清理过期节点
+        Clean up expired nodes
         
         Args:
-            max_age_days: 最大保留天数
+            max_age_days: Maximum number of days to retain data
             
         Returns:
-            清理的节点数量
+            Number of nodes cleaned
         """
         cutoff = datetime.now() - timedelta(days=max_age_days)
         to_remove = []
         
         async with self._lock:
             for identifier, node in self._cache.items():
-                # 检查最后测试时间
+                # Check the last test time
                 if node.last_tested:
                     try:
                         last_tested = datetime.fromisoformat(node.last_tested)
@@ -210,25 +210,25 @@ class NodeStorage:
     
     async def merge_with_subscription(self, sub_nodes: List[VlessNode], auto_save: bool = True) -> tuple:
         """
-        合并订阅节点与本地存储
+        Merge subscription nodes and local storage
         
         Args:
-            sub_nodes: 从订阅获取的节点
+            sub_nodes: Nodes obtained from the subscription
             
         Returns:
-            (新增数量, 更新数量, 移除数量)
+            (Number of new additions, number of updates, number of removals)
         """
         async with self._lock:
             added = 0
             updated = 0
             
-            # 获取订阅中的标识符
+            # Get the identifier from the subscription
             sub_identifiers = {n.identifier for n in sub_nodes}
             
-            # 更新或添加节点
+            # Update or add nodes
             for node in sub_nodes:
                 if node.identifier in self._cache:
-                    # 更新现有节点（保留状态）
+                    # Update existing nodes (preserve state)
                     existing = self._cache[node.identifier]
                     node.is_available = existing.is_available
                     node.fail_count = existing.fail_count
@@ -241,11 +241,11 @@ class NodeStorage:
                 
                 self._cache[node.identifier] = node
             
-            # 标记不在订阅中的节点（但不删除，保留历史）
+            # Mark nodes that are not in the subscription (but do not delete them, retain history).
             removed = 0
             for identifier in list(self._cache.keys()):
                 if identifier not in sub_identifiers:
-                    # 可选：标记为不可用或删除
+                    # Optional: Mark as unavailable or delete
                     # self._cache[identifier].is_available = False
                     pass
             
@@ -258,11 +258,11 @@ class NodeStorage:
         return added, updated, removed
     
     def get_stats(self) -> Dict[str, Any]:
-        """获取存储统计"""
+        """Get Storage Statistics"""
         total = len(self._cache)
         available = len(self.get_available_nodes())
         
-        # 按来源统计
+        # Statistics by Source
         by_source = {}
         for node in self._cache.values():
             source = node.source_subscription or "unknown"
@@ -282,12 +282,12 @@ class NodeStorage:
         }
 
 
-# 全局存储实例
+# Global Storage Instance
 _global_storage: Optional[NodeStorage] = None
 
 
 def get_node_storage(storage_file: Optional[str] = None) -> NodeStorage:
-    """获取全局存储实例"""
+    """Get Global Storage Instance"""
     global _global_storage
     if _global_storage is None:
         _global_storage = NodeStorage(storage_file)
@@ -295,7 +295,7 @@ def get_node_storage(storage_file: Optional[str] = None) -> NodeStorage:
 
 
 async def init_node_storage(storage_file: Optional[str] = None) -> NodeStorage:
-    """初始化并加载节点存储"""
+    """Initialize and load the node storage."""
     storage = get_node_storage(storage_file)
     await storage.load()
     return storage

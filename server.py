@@ -108,9 +108,9 @@ session_manager = ChatSessionManager(ttl_hours=24)
 # Global subscription proxy pool
 subscription_pool = None
 
-# 初始化订阅代理池
+# Initialize the subscription proxy pool
 async def init_proxy_pool():
-    """初始化订阅代理池"""
+    """Initialize the subscription proxy pool."""
     global subscription_pool
     try:
         subscription_pool = await init_subscription_pool_from_env()
@@ -131,7 +131,7 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup_event():
-    """服务启动时初始化"""
+    """Initialize during service startup."""
     await init_proxy_pool()
 
 
@@ -383,7 +383,7 @@ async def root():
     }
 
 
-# ==================== Vless 代理管理 API ====================
+# ==================== Vless Proxy Management API ===================
 
 class ProxyRefreshRequest(BaseModel):
     test_nodes: bool = True
@@ -396,7 +396,7 @@ class ProxyTestRequest(BaseModel):
 
 @app.get("/v1/proxy/stats")
 async def proxy_stats():
-    """获取代理池统计信息"""
+    """Get proxy pool statistics"""
     global subscription_pool
     
     if subscription_pool is None:
@@ -417,7 +417,7 @@ async def proxy_stats():
 
 @app.post("/v1/proxy/refresh")
 async def proxy_refresh(request: ProxyRefreshRequest, background_tasks: BackgroundTasks):
-    """刷新订阅并测试节点"""
+    "Refresh subscriptions and test nodes"
     global subscription_pool
     
     if subscription_pool is None:
@@ -435,7 +435,7 @@ async def proxy_refresh(request: ProxyRefreshRequest, background_tasks: Backgrou
 
 @app.post("/v1/proxy/test")
 async def proxy_test(request: ProxyTestRequest):
-    """测试代理节点"""
+    """Test Proxy Node"""
     global subscription_pool
     
     if subscription_pool is None:
@@ -467,7 +467,7 @@ async def proxy_test(request: ProxyTestRequest):
 
 @app.get("/v1/proxy/nodes")
 async def proxy_nodes(pattern: Optional[str] = None, only_available: bool = True):
-    """获取代理节点列表"""
+    """Get the list of proxy nodes"""
     global subscription_pool
     
     if subscription_pool is None:

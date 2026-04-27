@@ -59,7 +59,7 @@ class QwenAiAdapter:
         self._force_thinking = None
         self.use_proxy = use_proxy
         
-        # 初始化代理管理器
+        # Initialize the agent manager
         if use_proxy:
             self.proxy_manager = init_proxy_manager()
             self.session = self.proxy_manager.create_session(use_vless=True)
