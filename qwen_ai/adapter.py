@@ -214,16 +214,13 @@ class QwenAiAdapter:
                 if msg.get('content'):
                     conversation_parts.append(f"Assistant: {msg['content']}")
             elif msg['role'] == 'tool':
-                # ✅ Handle tool results
-                # Qwen expects tool results to be clearly marked
                 tool_call_id = msg.get('tool_call_id', 'unknown')
                 content = msg['content']
-                # If content is a list (OpenAI style), extract text
                 if isinstance(content, list):
                     text_parts = [item['text'] for item in content if item.get('type') == 'text']
                     content = '\n'.join(text_parts)
-                
-                conversation_parts.append(f"Tool Result [{tool_call_id}]: {content}")
+                # Format as a system-style result, not echoed conversation
+                conversation_parts.append(f"<tool_result id=\"{tool_call_id}\">\n{content}\n</tool_result>")
         
         # Combine all messages into user_content
         user_content = '\n\n'.join(conversation_parts)

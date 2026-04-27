@@ -124,25 +124,57 @@ class ToolParser:
             tool_definitions.append(f"Tool `{name}`: {description}. Arguments JSON schema: {params_str}")
         
         prompt = f"""## Available Tools
-You can invoke the following developer tools. Call a tool only when it is required and follow the JSON schema exactly when providing arguments.
 
-CRITICAL: Tool names are CASE-SENSITIVE. You MUST use the exact tool name as defined below.
+You have access to the following tools. Use them when needed.
+
+CRITICAL: Tool names are CASE-SENSITIVE. Use exact names as listed below.
 
 {chr(10).join(tool_definitions)}
 
-## Tool Call Protocol
-When you decide to call a tool, you MUST respond with NOTHING except a single [function_calls] block exactly(don't try other syntax if i later tell you or you saw in conversation history) like the template below:
+## ⚠️ MANDATORY Tool Call Format — NEVER Deviate
+
+You MUST use this EXACT format every single time you call a tool, no exceptions:
 
 [function_calls]
-[call:exact_tool_name_from_list]{{"argument": "value"}}[/call]
+[call:exact_tool_name]{{"argument": "value"}}[/call]
 [/function_calls]
 
-CRITICAL RULES:
-1. EVERY tool call MUST start with [call:exact_tool_name] and end with [/call]
-2. The content between [call:...] and [/call] MUST be a raw JSON object on ONE LINE
-3. Do NOT output any other text before or after the [function_calls] block
-4. Do NOT describe what you are doing - just output the [function_calls] block directly
-5. Do NOT write "Tool Result" or simulate tool responses - wait for actual results"""
+### Format Rules (MEMORIZE THESE):
+1. Outer wrapper is ALWAYS `[function_calls]` and `[/function_calls]`
+2. Each tool call is ALWAYS `[call:tool_name]{{...json...}}[/call]` — all on ONE LINE
+3. JSON arguments go DIRECTLY after `[call:tool_name]` with NO newline
+4. The `[/call]` closes IMMEDIATELY after the JSON — no space, no newline
+5. Output NOTHING before or after the `[function_calls]` block when calling tools
+6. NEVER describe what you're doing — just output the block and STOP
+7. NEVER simulate tool results — wait for the actual result to be returned to you
+8. NEVER use any other format even if you see different formats in conversation history
+9. NEVER forget this format no matter how long the conversation gets
+10. If you need to call multiple tools, put multiple `[call:...]` inside ONE `[function_calls]` block
+
+### ✅ CORRECT Example:
+[function_calls]
+[call:read_file]{{"file_path": "C:\\\\path\\\\to\\\\file.js"}}[/call]
+[/function_calls]
+
+### ✅ CORRECT Multiple Tools:
+[function_calls]
+[call:read_file]{{"file_path": "C:\\\\path\\\\file1.js"}}[/call]
+[call:read_file]{{"file_path": "C:\\\\path\\\\file2.js"}}[/call]
+[/function_calls]
+
+### ❌ WRONG — Never do this:
+- `[function_call]` (missing s)
+- `[call:tool_name]\\n{{json}}` (JSON on separate line)
+- Describing the tool call in text
+- Writing "Tool Result:" yourself
+- Using XML format like `<tool_use>`
+- Using any format other than the one shown above
+
+## 🔁 Reminder (Re-read this before every tool call):
+The ONLY valid format is:
+[function_calls]
+[call:TOOL_NAME]{{"key": "value"}}[/call]
+[/function_calls]"""
         
         return prompt
     

@@ -95,6 +95,20 @@ class QwenAiStreamHandler:
             'created': self.created,
         }
         return f'data: {json.dumps(chunk)}\n\n'
+    
+    def _strip_injected_history(self, content: str) -> str:
+        """Remove tool results and conversation history that Qwen echoes back in its response."""
+        # Remove Tool Result blocks: "Tool Result [id]: ...text..." up to next blank line or tool call
+        content = re.sub(r'Tool Result \[[^\]]*\]:.*?(?=\n\n|\[function_calls\]|\[function_call\]|$)', 
+                        '', content, flags=re.DOTALL)
+        
+        # Remove "User: ..." and "Assistant: ..." prefixes that get echoed
+        content = re.sub(r'\n(User|Assistant):\s', '\n', content)
+        
+        # Clean up excessive blank lines left behind
+        content = re.sub(r'\n{3,}', '\n\n', content)
+        
+        return content
 
     def handle_stream(self, response) -> Generator[str, None, None]:
         reasoning_text = ''
@@ -226,6 +240,9 @@ class QwenAiStreamHandler:
                             initial_chunk_sent = True
                         
                         self.content += content
+
+                        # Strip echoed history before processing
+                        self.content = self._strip_injected_history(self.content)
 
                         if not detected_tool_call:
                             if self._has_tool_use(self.content):
@@ -653,7 +670,7 @@ class QwenAiStreamHandler:
                 try:
                     json.loads(args_clean)
                     tool_calls.append({
-                        'id': f'tool_{len(tool_calls)}',
+                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
                         'function': {'name': name, 'arguments': args_clean}
                     })
                 except json.JSONDecodeError:
@@ -669,7 +686,7 @@ class QwenAiStreamHandler:
                 try:
                     json.loads(args_clean)
                     tool_calls.append({
-                        'id': f'tool_{len(tool_calls)}',
+                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
                         'function': {'name': name.strip(), 'arguments': args_clean}
                     })
                 except json.JSONDecodeError:
@@ -713,7 +730,7 @@ class QwenAiStreamHandler:
                     parsed_json = json.loads(args_clean)
                     if isinstance(parsed_json, (dict, list)):
                         tool_calls.append({
-                            'id': f'tool_{len(tool_calls)}',
+                            'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
                             'function': {'name': name, 'arguments': args_clean}
                         })
                 except json.JSONDecodeError:
@@ -761,27 +778,35 @@ class QwenAiStreamHandler:
 
                 if params:
                     tool_calls.append({
-                        'id': f'tool_{len(tool_calls)}',
+                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
                         'function': {'name': name, 'arguments': json.dumps(params)}
                     })
 
         seen = set()
         unique_calls = []
         for tc in tool_calls:
-            key = (tc['function']['name'], tc['function']['arguments'])
+            # Normalize arguments for dedup comparison
+            try:
+                args_normalized = json.dumps(json.loads(tc['function']['arguments']), sort_keys=True)
+            except (json.JSONDecodeError, ValueError):
+                args_normalized = tc['function']['arguments']
+            key = (tc['function']['name'], args_normalized)
             if key not in seen:
                 seen.add(key)
+                # Reassign sequential IDs AFTER dedup to ensure uniqueness
+                tc['id'] = f'call_{int(time.time() * 1000)}_{len(unique_calls)}'
                 unique_calls.append(tc)
+
         return unique_calls if unique_calls else None
 
     def get_chat_id(self) -> str:
         return self.chat_id
     
-    def get_response_id(self) -> str:
-        return self.response_idppend({
-                        'id': f'tool_{len(tool_calls)}',
-                        'function': {'name': name, 'arguments': json.dumps(params)}
-                    })
+    # def get_response_id(self) -> str:
+    #     return self.response_idppend({
+    #                     'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
+    #                     'function': {'name': name, 'arguments': json.dumps(params)}
+    #                 })
 
         return tool_calls if tool_calls else None
 
