@@ -23,6 +23,8 @@ class QwenAiStreamHandler:
         self.auto_delete_chat = auto_delete_chat
         self.delete_chat_func = delete_chat_func
         self.tools = tools
+        self._pre_emit_buffer = ''
+        self._in_suppressed_block = False
     
     def set_chat_id(self, chat_id: str):
         self.chat_id = chat_id
@@ -99,18 +101,22 @@ class QwenAiStreamHandler:
     def _strip_injected_history(self, content: str) -> str:
         """Remove tool results and conversation history that Qwen echoes back in its response."""
         # Remove Tool Result blocks: "Tool Result [id]: ...text..." up to next blank line or tool call
-        # content = re.sub(r'Tool Result \<[^\>]*\>:.*?(?=\n\n|\<function_calls\>|\<function_call\>|$)', 
+        # content = re.sub(r'Tool Result \<[^\>]*\>:.*?(?=\n\n|\<function_calls\>|\<function_call\>|$)',
         #                 '', content, flags=re.DOTALL)
-        
-        content = re.sub(r'\<tool_result id=\".*\"\>.*\<\/tool_result\>', 
-                        '', content, flags=re.DOTALL)
-        
+
+        # Remove tool_result tags (flexible matching)
+        content = re.sub(r'<(?:tool|system)[_\w]*[^>]*>.*?</(?:tool|system)[_\w]*>', '', content, flags=re.DOTALL | re.IGNORECASE)
+
+
         # Remove "User: ..." and "Assistant: ..." prefixes that get echoed
         content = re.sub(r'\n(User|Assistant):\s', '\n', content)
-        
+
+        # Remove system-reminder tags
+        content = re.sub(r'\</?(system-reminder|tool_result)\>',
+                        '', content, flags=re.DOTALL)
         # Clean up excessive blank lines left behind
         content = re.sub(r'\n{3,}', '\n\n', content)
-        
+
         return content
 
     def handle_stream(self, response) -> Generator[str, None, None]:
@@ -241,12 +247,40 @@ class QwenAiStreamHandler:
                             }
                             yield f'data: {json.dumps(initial_chunk)}\n\n'
                             initial_chunk_sent = True
-                        
+
                         self.content += content
 
-                        # Strip echoed history before processing
-                        self.content = self._strip_injected_history(self.content)
+                        # --- Suppression block handling ---
+                        if not self._in_suppressed_block:
+                            suppress_start = re.search(
+                                r'<(?:tool_result|system-reminder|system_reminder)[^>]*>',
+                                self._pre_emit_buffer + content
+                            )
+                            if suppress_start:
+                                self._in_suppressed_block = True
+                                combined = self._pre_emit_buffer + content
+                                safe_text = combined[:suppress_start.start()]
+                                self._pre_emit_buffer = combined[suppress_start.start():]
+                                # Feed safe_text into tool detection below
+                                content = safe_text  # only process text before suppressed block
+                            else:
+                                combined = self._pre_emit_buffer + content
+                                safe_len = max(0, len(combined) - 200)
+                                content = combined[:safe_len]        # safe to process
+                                self._pre_emit_buffer = combined[safe_len:]
+                        else:
+                            # Inside suppressed block — accumulate and check for closing tag
+                            self._pre_emit_buffer += content
+                            close_match = re.search(
+                                r'</(?:tool_result|system-reminder|system_reminder)>',
+                                self._pre_emit_buffer
+                            )
+                            if close_match:
+                                self._pre_emit_buffer = self._pre_emit_buffer[close_match.end():].lstrip('\n')
+                                self._in_suppressed_block = False
+                            content = ''  # nothing to emit this iteration
 
+                        # --- Tool call detection (unchanged logic, now uses buffered content) ---
                         if not detected_tool_call:
                             if self._has_tool_use(self.content):
                                 detected_tool_call = True
@@ -259,16 +293,24 @@ class QwenAiStreamHandler:
                                     pre_tool_text_buffer = ''
                                 pre_tool_flushed = True
                             else:
-                                if expect_tools:
-                                    pre_tool_text_buffer += content
-                                else:
-                                    if content:
+                                if content:  # only emit/buffer the safe buffered content
+                                    if expect_tools:
+                                        pre_tool_text_buffer += content
+                                    else:
                                         yield self._emit_content_chunk(content)
 
                     # ----------------------------------------------------------------
                     # Handle finished status
                     # ----------------------------------------------------------------
                     if status == 'finished' and (phase == 'answer' or phase is None):
+                        if self._pre_emit_buffer and not self._in_suppressed_block and not detected_tool_call:
+                            remaining = self._pre_emit_buffer.strip('\n')
+                            self._pre_emit_buffer = ''
+                            if remaining:
+                                if expect_tools:
+                                    pre_tool_text_buffer += remaining
+                                else:
+                                    yield self._emit_content_chunk(remaining)
                         if detected_tool_call:
                             for chunk in self._generate_tool_calls():
                                 yield chunk
@@ -312,7 +354,7 @@ class QwenAiStreamHandler:
         finally:
             if stream_finished_normally:
                 return  # already handled cleanly, do nothing
-            
+
             if not self.tool_calls_sent:
                 if detected_tool_call:
                     try:
@@ -335,8 +377,9 @@ class QwenAiStreamHandler:
                         return
                     else:
                         yield self._emit_content_chunk(pre_tool_text_buffer)
+                        pre_tool_text_buffer = ''
 
-                # Always send final chunk + DONE if we didn't finish normally
+                # Send final chunk + DONE if we didn't finish normally
                 final_chunk = {
                     'id': self.response_id or self.chat_id,
                     'model': self.model,

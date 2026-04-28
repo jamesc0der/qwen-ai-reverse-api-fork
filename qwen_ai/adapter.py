@@ -207,7 +207,11 @@ class QwenAiAdapter:
             if msg['role'] == 'system':
                 system_content += (system_content + '\n\n' if system_content else '') + msg['content']
             elif msg['role'] == 'user':
-                conversation_parts.append(f"User: {msg['content']}")
+                content = msg['content']
+                if isinstance(content, list):
+                    text_parts = [item['text'] for item in content if item.get('type') == 'text']
+                    content = '\n'.join(text_parts)
+                conversation_parts.append(f"User: {content}")
             elif msg['role'] == 'assistant':
                 # If assistant has tool_calls, we should ideally represent them, 
                 # but for now, we'll just use the content if available or skip if it was a pure tool call
