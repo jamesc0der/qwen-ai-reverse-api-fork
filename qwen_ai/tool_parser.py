@@ -190,7 +190,7 @@ You MUST use this EXACT format every single time you call a tool, no exceptions:
 - `<function_call>` (missing s)
 - `<call:tool_name>\\n{{json}}` (JSON on separate line)
 - Describing the tool call in text
-- Writing "Tool Result:" yourself
+- Writing "<tool_result "id"=".*">.*</tool_result>
 - Using XML format like `<tool_use>`
 - Using any format other than the one shown above
 

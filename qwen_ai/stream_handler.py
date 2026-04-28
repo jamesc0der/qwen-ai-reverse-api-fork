@@ -99,7 +99,10 @@ class QwenAiStreamHandler:
     def _strip_injected_history(self, content: str) -> str:
         """Remove tool results and conversation history that Qwen echoes back in its response."""
         # Remove Tool Result blocks: "Tool Result [id]: ...text..." up to next blank line or tool call
-        content = re.sub(r'Tool Result \<[^\>]*\>:.*?(?=\n\n|\<function_calls\>|\<function_call\>|$)', 
+        # content = re.sub(r'Tool Result \<[^\>]*\>:.*?(?=\n\n|\<function_calls\>|\<function_call\>|$)', 
+        #                 '', content, flags=re.DOTALL)
+        
+        content = re.sub(r'\<tool_result id=\".*\"\>.*\<\/tool_result\>', 
                         '', content, flags=re.DOTALL)
         
         # Remove "User: ..." and "Assistant: ..." prefixes that get echoed
