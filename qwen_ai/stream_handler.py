@@ -6,6 +6,8 @@ import re
 from typing import Optional, Callable, Dict, Any, Generator
 from http.client import IncompleteRead
 
+from .debug_logger import log_raw, log_exception, log_tool_detected, log_tool_parsed, log_stream_chunk
+
 
 class QwenAiStreamHandler:
     """Qwen AI Stream Handler"""
@@ -114,6 +116,7 @@ class QwenAiStreamHandler:
         return content
 
     def handle_stream(self, response) -> Generator[str, None, None]:
+        log_raw("DEBUG", "STREAM_HANDLER", f"Starting stream handling for chat_id={self.chat_id}, model={self.model}")
         reasoning_text = ''
         has_sent_reasoning = False
         summary_text = ''
@@ -128,22 +131,25 @@ class QwenAiStreamHandler:
             for line in response.iter_lines():
                 if not line:
                     continue
-                
+
                 line_str = line.decode('utf-8')
-                
+
                 if not line_str.startswith('data: '):
                     continue
-                    
+
                 data_str = line_str[6:]
-                
+
                 if data_str == '[DONE]':
+                    log_raw("DEBUG", "STREAM_HANDLER", "[DONE] marker received")
                     continue
                 
                 try:
                     data = json.loads(data_str)
-                    
+                    log_stream_chunk(0, data.get('choices', [{}])[0].get('delta', {}).get('phase'), data_str[:200], None)
+
                     if data.get('response.created', {}).get('response_id'):
                         self.response_id = data['response.created']['response_id']
+                        log_raw("DEBUG", "STREAM_HANDLER", f"Response ID set: {self.response_id}")
                     
                     if not data.get('choices'):
                         continue
@@ -249,6 +255,7 @@ class QwenAiStreamHandler:
 
                         if not detected_tool_call:
                             if self._has_tool_use(self.content):
+                                log_tool_detected(0, self.content)
                                 detected_tool_call = True
                                 split_point = self._find_tool_start(self.content)
                                 pre_tool_text = self.content[:split_point]
@@ -270,10 +277,12 @@ class QwenAiStreamHandler:
                     # ----------------------------------------------------------------
                     if status == 'finished' and (phase == 'answer' or phase is None):
                         if detected_tool_call:
+                            log_raw("DEBUG", "STREAM_HANDLER", "Generating tool call chunks")
                             for chunk in self._generate_tool_calls():
                                 yield chunk
                             stream_finished_normally = True
                             self._handle_completion(self.chat_id)
+                            log_raw("DEBUG", "STREAM_HANDLER", "Stream finished normally with tool calls")
                             return
 
                         if expect_tools and pre_tool_text_buffer:
@@ -288,6 +297,7 @@ class QwenAiStreamHandler:
                                 pre_tool_text_buffer = ''
 
                         finish_reason = delta.get('finish_reason', 'stop')
+                        log_raw("DEBUG", "STREAM_HANDLER", f"Emitting final chunk with finish_reason={finish_reason}")
                         final_chunk = {
                             'id': self.response_id or self.chat_id,
                             'model': self.model,
@@ -297,18 +307,20 @@ class QwenAiStreamHandler:
                         }
                         yield f'data: {json.dumps(final_chunk)}\n\n'
                         yield 'data: [DONE]\n\n'
-                        
+
                         stream_finished_normally = True
                         self._handle_completion(self.chat_id)
+                        log_raw("DEBUG", "STREAM_HANDLER", "Stream finished normally")
                         return
                         
                 except json.JSONDecodeError:
                     continue
                     
         except IncompleteRead:
+            log_raw("WARNING", "STREAM_HANDLER", "IncompleteRead exception caught")
             pass
         except Exception as e:
-            print(f'[QwenAI] Stream error: {e}')
+            log_exception("stream_handler.handle_stream", e)
         finally:
             if stream_finished_normally:
                 return  # already handled cleanly, do nothing
@@ -320,7 +332,7 @@ class QwenAiStreamHandler:
                             if chunk is not None:
                                 yield chunk
                     except Exception as e:
-                        print(f'[QwenAI] Error generating tool calls: {e}')
+                        log_exception("stream_handler.generate_tool_calls_finally", e)
                     return
 
                 # Flush any buffered content (stream died before status=finished)
@@ -331,12 +343,13 @@ class QwenAiStreamHandler:
                                 if chunk is not None:
                                     yield chunk
                         except Exception as e:
-                            print(f'[QwenAI] Error generating tool calls: {e}')
+                            log_exception("stream_handler.generate_tool_calls_finally_2", e)
                         return
                     else:
                         yield self._emit_content_chunk(pre_tool_text_buffer)
 
                 # Always send final chunk + DONE if we didn't finish normally
+                log_raw("WARNING", "STREAM_HANDLER", "Stream did not finish normally, emitting fallback chunks")
                 final_chunk = {
                     'id': self.response_id or self.chat_id,
                     'model': self.model,
@@ -349,6 +362,7 @@ class QwenAiStreamHandler:
                 self._handle_completion(self.chat_id)
     
     def handle_non_stream(self, response) -> Dict[str, Any]:
+        log_raw("DEBUG", "STREAM_HANDLER", f"Starting non-stream handling for chat_id={self.chat_id}, model={self.model}")
         data = {
             'id': '',
             'model': self.model,
@@ -388,6 +402,7 @@ class QwenAiStreamHandler:
                     if parsed.get('response.created', {}).get('response_id'):
                         self.response_id = parsed['response.created']['response_id']
                         data['id'] = self.response_id
+                        log_raw("DEBUG", "STREAM_HANDLER", f"Non-stream response ID set: {self.response_id}")
                     
                     if not parsed.get('choices'):
                         continue
@@ -422,7 +437,7 @@ class QwenAiStreamHandler:
                     continue
                     
         except Exception as e:
-            print(f'[QwenAI] Non-stream error: {e}')
+            log_exception("stream_handler.handle_non_stream", e)
         
         final_reasoning = reasoning_text or summary_text
         if final_reasoning:
@@ -430,8 +445,10 @@ class QwenAiStreamHandler:
         
         content = data['choices'][0]['message']['content']
         if self._has_tool_use(content):
+            log_tool_detected(0, content)
             tool_calls = self._parse_tool_use(content)
             if tool_calls:
+                log_tool_parsed(0, tool_calls)
                 split_point = self._find_tool_start(content)
                 pre_tool_text = content[:split_point]
                 data['choices'][0]['message']['content'] = pre_tool_text if pre_tool_text.strip() else None
@@ -447,6 +464,7 @@ class QwenAiStreamHandler:
                 ]
                 data['choices'][0]['finish_reason'] = 'tool_calls'
         self._handle_completion(self.chat_id)
+        log_raw("DEBUG", "STREAM_HANDLER", "Non-stream handling completed")
         return data
     
     def _has_tool_use(self, content: str) -> bool:
@@ -495,8 +513,11 @@ class QwenAiStreamHandler:
     def _generate_tool_calls(self):
         """Generate tool calls chunks. If parsed calls don't match known tools,
         yield the full content as a regular text chunk instead."""
+        log_raw("DEBUG", "STREAM_HANDLER", f"Generating tool calls, known tools: {[t.get('function', {}).get('name', '') for t in (self.tools or [])]}")
         tool_name_list = [t.get('function', {}).get('name', '') for t in (self.tools or [])]
         all_parsed = self._parse_tool_use(self.content) or []
+        if all_parsed:
+            log_tool_parsed(0, all_parsed)
 
         tool_calls = [tc for tc in all_parsed if tc.get('function', {}).get('name', '') in tool_name_list]
         not_tool_calls = [tc for tc in all_parsed if tc.get('function', {}).get('name', '') not in tool_name_list]
@@ -827,17 +848,6 @@ class QwenAiStreamHandler:
 
     def get_chat_id(self) -> str:
         return self.chat_id
-    
-    # def get_response_id(self) -> str:
-    #     return self.response_idppend({
-    #                     'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
-    #                     'function': {'name': name, 'arguments': json.dumps(params)}
-    #                 })
 
-        return tool_calls if tool_calls else None
-
-    def get_chat_id(self) -> str:
-        return self.chat_id
-    
     def get_response_id(self) -> str:
         return self.response_id

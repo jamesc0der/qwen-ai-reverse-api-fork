@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+
+from .debug_logger import log_raw, log_exception, log_proxy_selected, log_proxy_result
 from urllib3.util.connection import create_connection
 from urllib3.util.ssl_ import create_urllib3_context
 
@@ -245,33 +247,38 @@ class VlessHTTPAdapter(HTTPAdapter):
     def get_connection(self, url: str, proxies: Optional[Dict[str, str]] = None):
         """
         Get connection
-        
+
         If a Vless proxy is configured, use the proxy to connect.
         """
         # Check if a Vless proxy is available
         proxy = self.proxy_pool.get_proxy(self.proxy_strategy) if self.proxy_pool.count > 0 else None
-        
+
         if proxy:
             # Using Vless proxy
             parsed = urlparse(url)
             host = parsed.hostname
             port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-            
+            log_proxy_selected(proxy.identifier, self.proxy_strategy)
+
             try:
+                log_raw("DEBUG", "PROXY_ADAPTER", f"Creating Vless connection to {host}:{port} via {proxy.identifier}")
                 conn = VlessProxyConnection(proxy, host, port)
                 sock = conn.connect()
-                
+
                 # Mark proxy usage successful
                 proxy.mark_success()
-                
+                log_proxy_result(proxy.identifier, True)
+
                 # Returns a wrapped link
                 return VlessConnectionWrapper(sock, conn, parsed.scheme == 'https')
                 
             except Exception as e:
                 proxy.mark_fail()
+                log_proxy_result(proxy.identifier, False, error=str(e))
                 raise ConnectionError(f'Vless proxy connection failed: {e}')
-        
+
         # No proxy, using default connection
+        log_raw("DEBUG", "PROXY_ADAPTER", f"No proxy available, using direct connection to {urlparse(url).hostname}")
         return super().get_connection(url, proxies)
     
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
@@ -377,17 +384,19 @@ class ProxyManager:
     def create_session(self, use_vless: bool = True) -> requests.Session:
         """
         Create a requests session with a proxy configured.
-        
+
         Args:
             use_vless: Whether to use a Vless proxy
-            
+
         Returns:
             Configured Session
         """
+        log_raw("DEBUG", "PROXY_MANAGER", f"Creating session with use_vless={use_vless}")
         session = requests.Session()
-        
+
         if use_vless and self.vless_pool and self.vless_pool.count > 0:
             # Using Vless proxy
+            log_raw("DEBUG", "PROXY_MANAGER", f"Using Vless proxy pool with {self.vless_pool.count} proxies")
             adapter = VlessHTTPAdapter(proxy_pool=self.vless_pool)
             session.mount('http://', adapter)
             session.mount('https://', adapter)
@@ -396,8 +405,11 @@ class ProxyManager:
             # Using a regular HTTP proxy
             proxies = self.get_requests_proxies()
             if proxies:
+                log_raw("DEBUG", "PROXY_MANAGER", f"Using HTTP proxy: {proxies}")
                 session.proxies = proxies
-        
+            else:
+                log_raw("DEBUG", "PROXY_MANAGER", "Using direct connection (no proxy)")
+
         return session
     
     def get_stats(self) -> Dict[str, Any]:

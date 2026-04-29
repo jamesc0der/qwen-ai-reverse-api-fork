@@ -4,6 +4,8 @@ import json
 import re
 from typing import List, Dict, Optional, Tuple
 
+from .debug_logger import log_raw, log_tool_parsed
+
 class ToolParser:
     """Tool parser for Qwen AI"""
     

@@ -248,11 +248,11 @@ class Subscription:
                     self.nodes = self._parse_content(content)
                     self.last_update = datetime.now()
                     
-                    logger.info(f"Fetched {len(self.nodes)} nodes from {self.name}")
+                    log_raw("INFO", "SUBSCRIPTION", f"Fetched {len(self.nodes)} nodes from {self.name}")
                     return self.nodes
-                    
+
         except Exception as e:
-            logger.error(f"Failed to fetch subscription {self.name}: {e}")
+            log_raw("ERROR", "SUBSCRIPTION", f"Failed to fetch subscription {self.name}: {e}")
             raise
     
     def _parse_content(self, content: str) -> List[VlessNode]:

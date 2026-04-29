@@ -8,6 +8,7 @@ import requests
 from typing import Dict, Optional, Tuple, Any
 
 from .proxy_adapter import ProxyManager, get_proxy_manager, init_proxy_manager
+from .debug_logger import log_raw, log_exception, log_chat_create, log_chat_delete, log_proxy_selected, log_proxy_result
 
 
 class QwenAiAdapter:
@@ -112,6 +113,7 @@ class QwenAiAdapter:
     
     def create_chat(self, model_id: str, title: str = 'New Chat') -> str:
         """Create a new chat"""
+        log_raw("DEBUG", "ADAPTER", f"Creating chat with model_id={model_id}, title={title}")
         url = f'{self.QWEN_AI_BASE}/api/v2/chats/new'
         payload = {
             'title': title,
@@ -132,55 +134,67 @@ class QwenAiAdapter:
         
         response.raise_for_status()
         data = response.json()
-        
+
         if not data.get('data', {}).get('id'):
+            log_raw("ERROR", "ADAPTER", "Failed to create chat: no chat ID returned")
             raise ValueError('Failed to create chat: no chat ID returned')
-        
-        return data['data']['id']
+
+        chat_id = data['data']['id']
+        log_chat_create(0, model_id, chat_id)
+        return chat_id
     
     def delete_chat(self, chat_id: str) -> bool:
         """Delete a chat"""
+        log_raw("DEBUG", "ADAPTER", f"Deleting chat with chat_id={chat_id}")
         url = f'{self.QWEN_AI_BASE}/api/v2/chats/{chat_id}'
-        
+
         response = self.session.delete(
             url,
             headers=self.get_headers(),
             timeout=30
         )
-        
+
         response.raise_for_status()
         data = response.json()
-        
-        return data.get('success', False)
+
+        success = data.get('success', False)
+        log_chat_delete(chat_id, success)
+        return success
     
     def delete_all_chats(self) -> bool:
         """Delete all chats"""
+        log_raw("DEBUG", "ADAPTER", "Deleting all chats")
         url = f'{self.QWEN_AI_BASE}/api/v2/chats/'
-        
+
         response = self.session.delete(
             url,
             headers=self.get_headers(),
             timeout=30
         )
-        
+
         response.raise_for_status()
         data = response.json()
-        
-        return data.get('success', False)
+
+        success = data.get('success', False)
+        log_raw("INFO", "ADAPTER", f"Delete all chats result: {success}")
+        return success
     
-    def chat_completion(self, model: str, messages: list, stream: bool = True, 
-                      temperature: Optional[float] = None, enable_thinking: Optional[bool] = None, 
+    def chat_completion(self, model: str, messages: list, stream: bool = True,
+                      temperature: Optional[float] = None, enable_thinking: Optional[bool] = None,
                       thinking_budget: Optional[int] = None,
                       auto_delete_chat: bool = False) -> Tuple[requests.Response, str, Optional[str]]:
         """Send chat completion request
-        
+
         Args:
             auto_delete_chat: Whether to delete the chat after completion
         """
+        log_raw("DEBUG", "ADAPTER", f"Chat completion request: model={model}, stream={stream}, messages={len(messages)}, auto_delete={auto_delete_chat}")
         if not self.token:
+            log_raw("ERROR", "ADAPTER", "Qwen AI token not configured")
             raise ValueError('Qwen AI token not configured')
-        
+
         model_id = self.map_model(model)
+        log_raw("DEBUG", "ADAPTER", f"Mapped model {model} to {model_id}")
         
         # Detect thinking mode from model name
         model_lower = model.lower()
@@ -228,7 +242,8 @@ class QwenAiAdapter:
         # Prepend system content
         if system_content:
             user_content = f'{system_content}\n\n{user_content}'
-        
+
+        log_raw("DEBUG", "ADAPTER", f"User content length: {len(user_content)} characters")
         fid = self._uuid()
         child_id = self._uuid()
         ts = int(time.time())
