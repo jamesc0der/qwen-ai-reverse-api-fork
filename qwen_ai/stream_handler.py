@@ -56,31 +56,24 @@ class QwenAiStreamHandler:
         if self.tools:
             tool_names = {t.get('function', {}).get('name', '') for t in self.tools}
 
-        if '<function_calls>' in clean or '<function_call>' in clean:
-            marker = '<function_calls>' if '<function_calls>' in clean else '<function_call>'
-            if tool_names:
-                if any(f'<call:{n}>' in clean for n in tool_names):
-                    return clean.find(marker)
-                if any(f'<{n}>' in clean for n in tool_names):
-                    return clean.find(marker)
-            else:
-                return clean.find(marker)
-
+        # Find the start of any tool syntax
+        if '<function_calls>' in clean:
+            return clean.find('<function_calls>')
+        if '<function_call>' in clean:
+            return clean.find('<function_call>')
         if '<tool_use>' in clean:
-            if not tool_names or any(f'<n>{n}</n>' in clean for n in tool_names):
-                return clean.find('<tool_use>')
+            return clean.find('<tool_use>')
 
+        # Find tool name tags
         if tool_names:
             earliest = len(content)
             for name in tool_names:
                 tag = f'<{name}>'
                 idx = clean.find(tag)
-                if idx == -1:
-                    continue
-                # Accept exact or mismatched closing tag
-                if f'</{name}>' in clean[idx:] or re.search(r'\</\w+\>', clean[idx:]):
+                if idx != -1:
                     earliest = min(earliest, idx)
-            return earliest
+            if earliest < len(content):
+                return earliest
 
         return len(content)
 
@@ -265,6 +258,10 @@ class QwenAiStreamHandler:
                                         yield self._emit_content_chunk(pre_tool_text)
                                     pre_tool_text_buffer = ''
                                 pre_tool_flushed = True
+                            elif self._has_partial_tool_syntax(self.content):
+                                # Buffer content when partial tool syntax is detected
+                                if expect_tools:
+                                    pre_tool_text_buffer += content
                             else:
                                 if expect_tools:
                                     pre_tool_text_buffer += content
@@ -467,65 +464,54 @@ class QwenAiStreamHandler:
         log_raw("DEBUG", "STREAM_HANDLER", "Non-stream handling completed")
         return data
     
+    def _has_partial_tool_syntax(self, content: str) -> bool:
+        """Check for partial tool call syntax that should be buffered."""
+        clean = self._strip_code_spans(content)
+
+        # Check for any XML-like tags that could be tool syntax
+        if '<' in clean:
+            return True
+
+        return False
+
     def _has_tool_use(self, content: str) -> bool:
         clean = self._strip_code_spans(content)
-        tool_names = set()
-        if self.tools:
-            tool_names = {t.get('function', {}).get('name', '') for t in self.tools}
 
         if '<function_calls>' in clean or '<function_call>' in clean:
-            # Only count it if there's a <call:known_tool> inside
-            if tool_names:
-                if any(f'<call:{n}>' in clean for n in tool_names):
-                    return True
-            else:
-                return True
+            return True
 
         if '<tool_use>' in clean:
-            if tool_names:
-                if any(f'<n>{n}</n>' in clean for n in tool_names):
-                    return True
-            else:
-                return True
+            return True
 
-        # Simplified/nested tag format — only match known tool names
-        if tool_names:
-            for name in tool_names:
-                if f'<{name}>' not in clean:
-                    continue
-                # Accept exact closing tag OR any closing tag after opening
-                if f'</{name}>' in clean:
-                    return True
-                # Mismatched closing tag fallback (e.g. </todo> for <todo_write>)
-                idx = clean.find(f'<{name}>')
-                if idx != -1 and re.search(r'\</\w+\>', clean[idx:]):
-                    return True
+        # Check for simplified XML format: <tool_name>{...}</tool_name>
+        # Use DOTALL flag to match across newlines, and non-greedy matching
+        simplified_pattern = r'\<(\w+)\>\s*\{.*?\}\s*\</\1\>'
+        matches = re.findall(simplified_pattern, content, re.DOTALL)
+        for name in matches:
+            if name.lower() not in ['function_calls', 'call']:
+                return True
 
         # Check for XML attribute format: <tag_name attr="value"></tag_name>
         attr_pattern = r'\<(\w+)\s+([^>]*)\>\s*\</\1\>'
-        for match in re.finditer(attr_pattern, clean):
-            name = match.group(1)
-            if name in tool_names or not tool_names:
-                return True
+        if re.search(attr_pattern, clean):
+            return True
 
         return False
 
     def _generate_tool_calls(self):
-        """Generate tool calls chunks. If parsed calls don't match known tools,
-        yield the full content as a regular text chunk instead."""
+        """Generate tool calls chunks for all parsed tool calls."""
         log_raw("DEBUG", "STREAM_HANDLER", f"Generating tool calls, known tools: {[t.get('function', {}).get('name', '') for t in (self.tools or [])]}")
-        tool_name_list = [t.get('function', {}).get('name', '') for t in (self.tools or [])]
         all_parsed = self._parse_tool_use(self.content) or []
         if all_parsed:
             log_tool_parsed(0, all_parsed)
 
-        tool_calls = [tc for tc in all_parsed if tc.get('function', {}).get('name', '') in tool_name_list]
-        not_tool_calls = [tc for tc in all_parsed if tc.get('function', {}).get('name', '') not in tool_name_list]
-
-        if tool_calls:
+        if all_parsed:
             self.tool_calls_sent = True
+            # Strip tool syntax from content when emitting tool calls
+            split_point = self._find_tool_start(self.content)
+            self.content = self.content[:split_point]
 
-            for i, tc in enumerate(tool_calls):
+            for i, tc in enumerate(all_parsed):
                 chunk = {
                     'id': self.response_id or self.chat_id,
                     'model': self.model,
@@ -561,23 +547,7 @@ class QwenAiStreamHandler:
             yield 'data: [DONE]\n\n'
             self._handle_completion(self.chat_id)
 
-        else:
-            # No matching tool calls (either not_tool_calls or completely empty parse)
-            # Emit text up to where tool syntax started, suppress the rest
-            split_point = self._find_tool_start(self.content)
-            text_to_emit = self.content[:split_point]
-            if text_to_emit.strip():
-                yield self._emit_content_chunk(text_to_emit)
-            finish_chunk = {
-                'id': self.response_id or self.chat_id,
-                'model': self.model,
-                'object': 'chat.completion.chunk',
-                'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
-                'created': self.created,
-            }
-            yield f'data: {json.dumps(finish_chunk)}\n\n'
-            yield 'data: [DONE]\n\n'
-            self._handle_completion(self.chat_id)
+
     
     def _is_json_tool_call(self, content: str) -> bool:
         content = content.strip()
