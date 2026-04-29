@@ -20,6 +20,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from .debug_logger import log_raw, log_exception, log_proxy_selected, log_proxy_result
+
 
 class VlessURI:
     """Parsing Vless URI"""
@@ -286,15 +288,16 @@ class VlessProxy:
     async def test_connection(self, target_host: str = 'www.google.com', target_port: int = 443, timeout: int = 10) -> bool:
         """
         Test proxy connection
-        
+
         Args:
             target_host: The target host for testing
             target_port: The target port for testing
             timeout: Timeout duration (seconds)
-            
+
         Returns:
             Is the connection successful?
         """
+        log_raw("DEBUG", "VLESS_PROXY", f"Testing connection to {target_host}:{target_port} via {self.identifier}")
         try:
             reader, writer = await asyncio.wait_for(
                 self.create_connection(target_host, target_port),
@@ -314,11 +317,13 @@ class VlessProxy:
             
             if response:
                 self.mark_success()
+                log_proxy_result(self.identifier, True)
                 return True
+            log_proxy_result(self.identifier, False, error="No response received")
             return False
-            
+
         except Exception as e:
-            logger.debug(f'Vless proxy test failed for {self.identifier}: {e}')
+            log_proxy_result(self.identifier, False, error=str(e))
             self.mark_fail()
             return False
 
@@ -344,10 +349,10 @@ class VlessProxyPool:
         try:
             proxy = VlessProxy(uri)
             self._proxies.append(proxy)
-            logger.info(f'Added Vless proxy: {proxy.identifier}')
+            log_raw("INFO", "VLESS_POOL", f'Added Vless proxy: {proxy.identifier}')
             return True
         except Exception as e:
-            logger.error(f'Failed to add Vless proxy: {e}')
+            log_raw("ERROR", "VLESS_POOL", f'Failed to add Vless proxy: {e}')
             return False
     
     def add_proxies_from_uris(self, uris: list[str]) -> Tuple[int, int]:
@@ -556,9 +561,10 @@ class SubscriptionProxyPool:
             Refresh Results Statistics
         """
         await self.init()
-        
+        log_raw("INFO", "SUBSCRIPTION_POOL", f"Starting subscription refresh (test_nodes={test_nodes})")
+
         # Get the latest subscription
-        logger.info("Refreshing subscriptions...")
+        log_raw("INFO", "SUBSCRIPTION_POOL", "Refreshing subscriptions...")
         sub_results = await self._subscription_manager.fetch_all()
         
         # Merge into storage
@@ -567,7 +573,7 @@ class SubscriptionProxyPool:
             all_nodes.extend(nodes)
         
         added, updated, _ = await self._node_storage.merge_with_subscription(all_nodes)
-        
+
         result = {
             'fetched_nodes': len(all_nodes),
             'added': added,
@@ -575,10 +581,11 @@ class SubscriptionProxyPool:
             'tested': 0,
             'available': 0
         }
-        
+        log_raw("INFO", "SUBSCRIPTION_POOL", f"Merged {len(all_nodes)} nodes: {added} added, {updated} updated")
+
         # Test Node
         if test_nodes and all_nodes:
-            logger.info("Testing nodes...")
+            log_raw("INFO", "SUBSCRIPTION_POOL", "Testing nodes...")
             test_results = await self._node_tester.test_nodes(all_nodes)
             
             # Update storage
@@ -586,11 +593,11 @@ class SubscriptionProxyPool:
             
             result['tested'] = len(test_results)
             result['available'] = sum(1 for r in test_results if r.success)
-        
+
         # keep
         await self._node_storage.save()
-        
-        logger.info(f"Refresh complete: {result}")
+
+        log_raw("INFO", "SUBSCRIPTION_POOL", f"Refresh complete: {result}")
         return result
     
     def get_available_nodes(self, pattern: Optional[str] = None) -> List['VlessNode']:

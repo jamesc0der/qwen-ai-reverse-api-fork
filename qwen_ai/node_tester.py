@@ -15,6 +15,7 @@ import aiohttp
 from .subscription import VlessNode, SubscriptionManager, get_subscription_manager
 from .node_storage import NodeStorage, get_node_storage
 from .vless_proxy import VlessProxy
+from .debug_logger import log_raw, log_exception
 
 logger = logging.getLogger(__name__)
 
@@ -196,10 +197,10 @@ class NodeTester:
             nodes = self._storage.get_available_nodes()
         
         if not nodes:
-            logger.warning("No nodes to test")
+            log_raw("WARNING", "NODE_TESTER", "No nodes to test")
             return []
-        
-        logger.info(f"Testing {len(nodes)} nodes" + (f" with pattern '{pattern}'" if pattern else ""))
+
+        log_raw("INFO", "NODE_TESTER", f"Testing {len(nodes)} nodes" + (f" with pattern '{pattern}'" if pattern else ""))
         
         results = await self.test_nodes(nodes, progress_callback)
         
