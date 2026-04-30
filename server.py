@@ -165,7 +165,7 @@ async def startup_event():
         or DEFAULT_DEBUG_LOGGING
     )
     if debug_flag:
-        log_path = init_session_logging(debug=True)
+        # log_path = init_session_logging(debug=True)
         log_raw("INFO", "SERVER", f"FastAPI startup — AUTO_DELETE_CHAT={AUTO_DELETE_CHAT}")
 
     await init_proxy_pool()

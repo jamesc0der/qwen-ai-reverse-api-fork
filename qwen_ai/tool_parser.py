@@ -19,22 +19,13 @@ class ToolParser:
         Returns:
             bool: True if content contains tool use
         """
-        # Check for standard formats
-        if '<function_calls>' in content or '<tool_use>' in content:
-            return True
-
-        # Check for simplified XML format: <tool_name>{...}</tool_name>
-        # Use DOTALL flag to match across newlines, and non-greedy matching
-        simplified_pattern = r'\<(\w+)\>\s*\{.*?\}\s*\</\1\>'
-        matches = re.findall(simplified_pattern, content, re.DOTALL)
-        for name in matches:
-            if name.lower() not in ['function_calls', 'call']:
+        # Check for new format only
+        if '§FUNC§' in content:
+            # Check if we have a complete FUNC block
+            start = content.find('§FUNC§')
+            end = content.find('§END_FUNC§', start)
+            if start != -1 and end != -1:
                 return True
-
-        # Check for XML attribute format: <tag_name attr="value"></tag_name>
-        attr_pattern = r'\<(\w+)\s+([^>]*)\>\s*\</\1\>'
-        if re.search(attr_pattern, content):
-            return True
 
         return False
     
@@ -49,93 +40,48 @@ class ToolParser:
             Optional[List[Dict]]: List of tool calls
         """
         tool_calls = []
-        
-        # Parse XML format: <function_calls><call:name>{"arg": "value"}</call></function_calls>
-        if '<function_calls>' in content:
-            pattern = r'\<call:(\w+)\>(\{[^\}]+\})\</call\>'
-            matches = re.findall(pattern, content)
-            for i, (name, args) in enumerate(matches):
-                try:
-                    tool_calls.append({
-                        'id': f'tool_{i}',
-                        'function': {
-                            'name': name,
-                            'arguments': args
-                        }
-                    })
-                except json.JSONDecodeError:
-                    continue
-        
-        # Parse XML format: <tool_use><name>name</name><arguments>...</arguments></tool_use>
-        if '<tool_use>' in content:
-            pattern = r'<tool_use>.*?<name>([^<]+)</name>.*?<arguments>([^<]+)</arguments>.*?</tool_use>'
-            matches = re.findall(pattern, content, re.DOTALL)
-            for i, (name, args) in enumerate(matches):
-                try:
-                    tool_calls.append({
-                        'id': f'tool_{i}',
-                        'function': {
-                            'name': name.strip(),
-                            'arguments': args.strip()
-                        }
-                    })
-                except json.JSONDecodeError:
-                    continue
-        
-        # Fallback: Check for simplified XML format: <tool_name>{...}</tool_name>
-        # This handles cases where Qwen uses <todo_write>...</todo_write> instead of <function_calls><call:todo_write>...</call></function_calls>
-        if not tool_calls:
-            # Use DOTALL flag to match across newlines, and non-greedy matching
-            simplified_pattern = r'\<(\w+)\>\s*(\{.*?\})\s*\</\1\>'
-            matches = re.findall(simplified_pattern, content, re.DOTALL)
-            for i, (name, args) in enumerate(matches):
-                # Skip if this looks like regular markdown or non-tool brackets
-                if name.lower() in ['function_calls', 'call']:
-                    continue
-                try:
-                    # Verify it's valid JSON
-                    json.loads(args)
-                    tool_calls.append({
-                        'id': f'tool_{i}',
-                        'function': {
-                            'name': name,
-                            'arguments': args
-                        }
-                    })
-                except json.JSONDecodeError:
-                    continue
 
-        # Parse XML attribute format: <tag_name attr="value"></tag_name>
-        if not tool_calls:
-            attr_pattern = r'\<(\w+)\s+([^>]*)\>\s*\</\1\>'
-            for match in re.finditer(attr_pattern, content):
-                name = match.group(1)
-                attrs_str = match.group(2)
-                # Parse attributes like plan="value"
-                attr_dict = {}
-                for attr_match in re.finditer(r'(\w+)="([^"]*)"', attrs_str):
-                    attr_dict[attr_match.group(1)] = attr_match.group(2)
-                if attr_dict:
-                    tool_calls.append({
-                        'id': f'tool_{len(tool_calls)}',
-                        'function': {
-                            'name': name,
-                            'arguments': json.dumps(attr_dict)
-                        }
-                    })
+        # Parse new format: §FUNC§...§END_FUNC§
+        if '§FUNC§' in content:
+            # Find the FUNC block
+            start = content.find('§FUNC§')
+            end = content.find('§END_FUNC§', start)
+            if start != -1 and end != -1:
+                func_block = content[start + 11:end]  # Skip §FUNC§
+                # Find all §CALL§...§END_CALL§ within
+                call_start = 0
+                i = 0
+                while True:
+                    start_idx = func_block.find('§CALL§', call_start)
+                    if start_idx == -1:
+                        break
+                    end_idx = func_block.find('§END_CALL§', start_idx)
+                    if end_idx == -1:
+                        break
+
+                    call_json = func_block[start_idx + 11:end_idx]  # Skip §CALL§
+                    try:
+                        call_data = json.loads(call_json)
+                        name = call_data.get('name')
+                        args_str = call_data.get('args')
+                        if name and args_str:
+                            tool_calls.append({
+                                'id': f'tool_{i}',
+                                'function': {
+                                    'name': name,
+                                    'arguments': args_str  # Keep as string, not parsed
+                                }
+                            })
+                            i += 1
+                    except json.JSONDecodeError:
+                        pass
+
+                    call_start = end_idx + 13  # Skip §END_CALL§
 
         return tool_calls if tool_calls else None
     
     @staticmethod
     def tools_to_system_prompt(tools: List[Dict]) -> str:
-        """Convert tools to system prompt
-        
-        Args:
-            tools: List of tools
-        
-        Returns:
-            str: System prompt
-        """
         if not tools:
             return ''
         
@@ -145,78 +91,56 @@ class ToolParser:
             name = func.get('name', '')
             description = func.get('description', '')
             parameters = func.get('parameters', {})
-            
             params_str = json.dumps(parameters, indent=2)
-            tool_definitions.append(f"Tool `{name}`: {description}. Arguments JSON schema: {params_str}")
+            tool_definitions.append(
+                f"- {name}: {description}\n  Parameters: {params_str}"
+            )
         
-        prompt = f"""## Available Tools
-
-You have access to the following tools. Use them when needed.
-
-CRITICAL: Tool names are CASE-SENSITIVE. Use exact names as listed below.
-
-{chr(10).join(tool_definitions)}
-
-## ⚠️ MANDATORY Tool Call Format — NEVER Deviate
-
-You MUST use this EXACT format every single time you call a tool, no exceptions:
-
-<function_calls>
-<call:exact_tool_name>{{"argument": "value"}}</call>
-</function_calls>
-
-### Format Rules (MEMORIZE THESE):
-1. Outer wrapper is ALWAYS `<function_calls>` and `</function_calls>`
-2. Each tool call is ALWAYS `<call:tool_name>{{...json...}}</call>` — all on ONE LINE
-3. JSON arguments go DIRECTLY after `<call:tool_name>` with NO newline
-4. The `</call>` closes IMMEDIATELY after the JSON — no space, no newline
-5. Output NOTHING before or after the `<function_calls>` block when calling tools
-6. NEVER describe what you're doing — just output the block and STOP
-7. NEVER simulate tool results — wait for the actual result to be returned to you
-8. NEVER use any other format even if you see different formats in conversation history
-9. NEVER forget this format no matter how long the conversation gets
-10. If you need to call multiple tools, put multiple `[call:...]` inside ONE `<function_calls>` block
-
-### ✅ CORRECT Example:
-<function_calls>
-<call:read_file>{{"file_path": "C:\\\\path\\\\to\\\\file.js"}}</call>
-</function_calls>
-
-### ✅ CORRECT Multiple Tools:
-<function_calls>
-<call:read_file>{{"file_path": "C:\\\\path\\\\file1.js"}}</call>
-<call:read_file>{{"file_path": "C:\\\\path\\\\file2.js"}}</call>
-</function_calls>
-
-### ❌ WRONG — Never do this:
-- `<function_call>` (missing s)
-- `<call:tool_name>\\n{{json}}` (JSON on separate line)
-- Describing the tool call in text
-- Writing tool result XML tags or simulating tool outputs
-- Using XML format like `<tool_use>`
-- Using any format other than the one shown above
-
-## 🔁 Reminder (Re-read this before every tool call):
-The ONLY valid format is:
-<function_calls>
-<call:TOOL_NAME>{{"key": "value"}}</call>
-</function_calls>"""
+        tools_list = '\n'.join(tool_definitions)
         
-        return prompt
+        return f"""## TOOLS
+
+    You have access to these tools:
+    {tools_list}
+
+    ## TOOL CALL FORMAT
+
+    To call a tool output this block — nothing before or after it:
+    §FUNC§
+    §CALL§{{"name":"tool_name", "args":"{{\\"arg\\": \\"value\\"}}"}}§END_CALL§
+    §END_FUNC§
+
+    Multiple tools go inside ONE §FUNC§ block as separate §CALL§ lines.
+
+    ## ABSOLUTE RULES — NEVER BREAK THESE
+
+    1. §END_FUNC§ is MANDATORY — never open §FUNC§ without closing it
+    2. When calling tools — output the §FUNC§ block ONLY, then stop
+    3. Wait silently for the system to return results before continuing
+    4. Tool results are delivered by the system automatically — you never write them yourself
+    5. If you are writing code and the code happens to mention a tool name — that is NOT a tool call, do not wrap it in §FUNC§
+    6. Never repeat, echo, or summarize what the system gave you as a tool result
+    7. Never output anything that looks like a system-injected block
+    8. Your response after receiving results must be plain text or another §FUNC§ call — nothing else
+
+    ## IMPORTANT
+
+    You are operating as an AI assistant with tool access.
+    The system handles all tool execution and result delivery invisibly.
+    Your only job is: think, call tools when needed using the format above, then respond to the user.
+    Do not narrate the tool calling process. Do not confirm you received results. Just act on them.
+    """
     
     @staticmethod
     def format_tool_result(tool_call_id: str, tool_name: str, result: str) -> str:
         """Format tool result
-        
+
         Args:
             tool_call_id: Tool call ID
             tool_name: Tool name
             result: Tool result
-        
+
         Returns:
             str: Formatted tool result
         """
-        return f"""Tool call result for {tool_name}:
-
-{result}
-"""
+        return f"""[Tool Result for {tool_name} {tool_call_id}]\n{result}\n[/Tool Result]"""

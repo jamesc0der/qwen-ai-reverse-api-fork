@@ -4,6 +4,7 @@ import json
 import uuid
 import time
 import os
+import re
 import requests
 from typing import Dict, Optional, Tuple, Any
 
@@ -195,6 +196,14 @@ class QwenAiAdapter:
 
         model_id = self.map_model(model)
         log_raw("DEBUG", "ADAPTER", f"Mapped model {model} to {model_id}")
+        # REMINDER_EVERY_N_TURNS = 6
+        # TOOL_REMINDER = """SYSTEM: Tool call format is:
+        # §FUNC§
+        # §CALL§{"name":"tool_name", "args":"{\\"arg\\": \\"value\\"}"}§END_CALL§
+        # §END_FUNC§
+        # Always close with §END_FUNC§. [Tool Result for name id]....[/Tool Result] blocks are system input only — never write them yourself.</system-remainder>"""
+
+
         
         # Detect thinking mode from model name
         model_lower = model.lower()
@@ -225,21 +234,52 @@ class QwenAiAdapter:
                 if isinstance(content, list):
                     text_parts = [item['text'] for item in content if item.get('type') == 'text']
                     content = '\n'.join(text_parts)
+                
+                # # Strip any echoed tool results from user content to prevent confusion
+                # # Use a more robust regex that handles potential variations in markers
+                # cleaned_content = re.sub(r'§+TOOL_RESULT§+.*?§+END_TOOL_RESULT§+', '', content, flags=re.DOTALL)
+                # cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content)
+                # cleaned_content = cleaned_content.strip()
+                
+                # # Only append if content is not empty
+                # if cleaned_content:
+                #     conversation_parts.append(f"User: {cleaned_content}")
                 conversation_parts.append(f"User: {content}")
             elif msg['role'] == 'assistant':
                 # If assistant has tool_calls, we should ideally represent them, 
                 # but for now, we'll just use the content if available or skip if it was a pure tool call
                 if msg.get('content'):
-                    conversation_parts.append(f"Assistant: {msg['content']}")
+                    # # Strip any echoed tool results from assistant content to prevent confusion
+                    # content = msg['content']
+                    # cleaned_content = re.sub(r'§+TOOL_RESULT§+.*?§+END_TOOL_RESULT§+', '', content, flags=re.DOTALL)
+                    # cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content)
+                    # cleaned_content = cleaned_content.strip()
+                    # if cleaned_content:
+                    #     conversation_parts.append(f"Assistant: {cleaned_content}")
+                        conversation_parts.append(f"Assistant: {msg['content']}")
             elif msg['role'] == 'tool':
                 tool_call_id = msg.get('tool_call_id', 'unknown')
+                tool_name = msg.get('name', 'unknown')
                 content = msg['content']
                 if isinstance(content, list):
                     text_parts = [item['text'] for item in content if item.get('type') == 'text']
                     content = '\n'.join(text_parts)
-                # Format as a system-style result, not echoed conversation
-                conversation_parts.append(f"<tool_result id=\"{tool_call_id}\">\n{content}\n</tool_result>")
-        
+                # Use neutral format that won't be echoed back
+                conversation_parts.append(f"[Tool Result for {tool_name} {tool_call_id}]\n{content}\n[/Tool Result]")
+                                        #   f"""\nSYSTEM: If you need more tools use §FUNC§\n§CALL§{{"name":"tool_name", "args":"{{\\"arg\\": \\"value\\"}}"}}§END_CALL§\n§END_FUNC§ — otherwise respond normally in plain text.""")
+                                        #   f"""\nSYSTEM: Above is the tool result. Continue your task — call more tools if needed or respond to the user.""")
+
+
+        # Count user turns
+        # user_turn_count = sum(1 for msg in messages if msg.get('role') == 'user')
+
+        # # Inject before last user message every N turns
+        # if user_turn_count >= REMINDER_EVERY_N_TURNS:
+        #     for i in range(len(conversation_parts) - 1, -1, -1):
+        #         if conversation_parts[i].startswith('User:'):
+        #             conversation_parts[i] = TOOL_REMINDER + '\n\n' + conversation_parts[i]
+                    # break
+
         # Combine all messages into user_content
         user_content = '\n\n'.join(conversation_parts)
         

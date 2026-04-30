@@ -53,30 +53,12 @@ class QwenAiStreamHandler:
         return content
 
     def _find_tool_start(self, content: str) -> int:
-        clean = self._strip_code_spans(content)
-        tool_names = set()
-        if self.tools:
-            tool_names = {t.get('function', {}).get('name', '') for t in self.tools}
-
-        # Find the start of any tool syntax
-        if '<function_calls>' in clean:
-            return clean.find('<function_calls>')
-        if '<function_call>' in clean:
-            return clean.find('<function_call>')
-        if '<tool_use>' in clean:
-            return clean.find('<tool_use>')
-
-        # Find tool name tags
-        if tool_names:
-            earliest = len(content)
-            for name in tool_names:
-                tag = f'<{name}>'
-                idx = clean.find(tag)
-                if idx != -1:
-                    earliest = min(earliest, idx)
-            if earliest < len(content):
-                return earliest
-
+        """Find the start index of the first tool call block."""
+        # Check for new format: §FUNC§
+        idx = content.find('§FUNC§')
+        if idx != -1:
+            return idx
+        
         return len(content)
 
     def _emit_content_chunk(self, content: str) -> str:
@@ -95,24 +77,20 @@ class QwenAiStreamHandler:
     
     def _strip_injected_history(self, content: str) -> str:
         """Remove tool results and conversation history that Qwen echoes back in its response."""
-        # Remove Tool Result blocks: "Tool Result [id]: ...text..." up to next blank line or tool call
-        # content = re.sub(r'Tool Result \<[^\>]*\>:.*?(?=\n\n|\<function_calls\>|\<function_call\>|$)',
-        #                 '', content, flags=re.DOTALL)
-
-        # Remove tool_result tags (flexible matching)
-        content = re.sub(r'<(?:tool|system)[_\w]*[^>]*>.*?</(?:tool|system)[_\w]*>', '', content, flags=re.DOTALL | re.IGNORECASE)
-
+        # if not content:
+        #     return content
+            
+        # Remove new tool result format (flexible § count)
+        # Use a more specific pattern to avoid stripping too much
+        # content = re.sub(r'§TOOL_RESULT§.*?§END_TOOL_RESULT§', '', content, flags=re.DOTALL)
 
         # Remove "User: ..." and "Assistant: ..." prefixes that get echoed
         content = re.sub(r'\n(User|Assistant):\s', '\n', content)
 
-        # Remove system-reminder tags
-        content = re.sub(r'\</?(system-reminder|tool_result)\>',
-                        '', content, flags=re.DOTALL)
         # Clean up excessive blank lines left behind
         content = re.sub(r'\n{3,}', '\n\n', content)
 
-        return content
+        return content.strip()
 
     def handle_stream(self, response) -> Generator[str, None, None]:
         log_raw("DEBUG", "STREAM_HANDLER", f"Starting stream handling for chat_id={self.chat_id}, model={self.model}")
@@ -252,7 +230,7 @@ class QwenAiStreamHandler:
                         # --- Suppression block handling ---
                         if not self._in_suppressed_block:
                             suppress_start = re.search(
-                                r'<(?:tool_result|system-reminder|system_reminder)[^>]*>',
+                                r'\[Tool Result for',
                                 self._pre_emit_buffer + content
                             )
                             if suppress_start:
@@ -271,7 +249,7 @@ class QwenAiStreamHandler:
                             # Inside suppressed block — accumulate and check for closing tag
                             self._pre_emit_buffer += content
                             close_match = re.search(
-                                r'</(?:tool_result|system-reminder|system_reminder)>',
+                                r'\[\/Tool Result\]',
                                 self._pre_emit_buffer
                             )
                             if close_match:
@@ -298,10 +276,13 @@ class QwenAiStreamHandler:
                                     pre_tool_text_buffer += content
                             else:
                                 if content:  # only emit/buffer the safe buffered content
-                                    if expect_tools:
-                                        pre_tool_text_buffer += content
-                                    else:
-                                        yield self._emit_content_chunk(content)
+                                    # Strip any echoed tool results from content before emitting/buffering
+                                    cleaned_content = self._strip_injected_history(content)
+                                    if cleaned_content:
+                                        if expect_tools:
+                                            pre_tool_text_buffer += cleaned_content
+                                        else:
+                                            yield self._emit_content_chunk(cleaned_content)
 
                     # ----------------------------------------------------------------
                     # Handle finished status
@@ -509,35 +490,24 @@ class QwenAiStreamHandler:
     
     def _has_partial_tool_syntax(self, content: str) -> bool:
         """Check for partial tool call syntax that should be buffered."""
-        clean = self._strip_code_spans(content)
-
-        # Check for any XML-like tags that could be tool syntax
-        if '<' in clean:
+        # Check for partial §FUNC§ or §CALL§ markers
+        if '§' in content:
             return True
-
+        
         return False
 
     def _has_tool_use(self, content: str) -> bool:
         clean = self._strip_code_spans(content)
 
-        if '<function_calls>' in clean or '<function_call>' in clean:
-            return True
-
-        if '<tool_use>' in clean:
-            return True
-
-        # Check for simplified XML format: <tool_name>{...}</tool_name>
-        # Use DOTALL flag to match across newlines, and non-greedy matching
-        simplified_pattern = r'\<(\w+)\>\s*\{.*?\}\s*\</\1\>'
-        matches = re.findall(simplified_pattern, content, re.DOTALL)
-        for name in matches:
-            if name.lower() not in ['function_calls', 'call']:
-                return True
-
-        # Check for XML attribute format: <tag_name attr="value"></tag_name>
-        attr_pattern = r'\<(\w+)\s+([^>]*)\>\s*\</\1\>'
-        if re.search(attr_pattern, clean):
-            return True
+        if '§FUNC§' in clean:
+            # Check if we have a complete FUNC block
+            start = clean.find('§FUNC§')
+            # Look for various possible end markers
+            end_markers = ['§END_FUNC§', '§FUNC§']  # §FUNC§ can be a corrupted end marker
+            for marker in end_markers:
+                end = clean.find(marker, start + 6)  # +6 to skip past the opening §FUNC§
+                if start != -1 and end != -1:
+                    return True
 
         return False
 
@@ -698,166 +668,79 @@ class QwenAiStreamHandler:
         # content = self._strip_code_spans(content)
         tool_calls = []
 
-        # 1. Standard Format: <function_calls><call:name>{...}</call></function_calls>
-        if '<function_calls>' in content or '<function_call>' in content:
-            for match in re.finditer(r'\<call:(\w+)\>', content):
-                name = match.group(1)
-                json_start = content.find('{', match.end())
-                if json_start == -1:
-                    continue
-                peek = content[json_start + 1:].lstrip()
-                if not (peek.startswith('"') or peek.startswith('}')):
-                    continue
-                args_clean = self._extract_json_from_pos(content, json_start)
-                if args_clean is None:
-                    continue
-                try:
-                    json.loads(args_clean)
-                    tool_calls.append({
-                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
-                        'function': {'name': name, 'arguments': args_clean}
-                    })
-                except json.JSONDecodeError:
-                    continue
-            if tool_calls:
-                return tool_calls
-
-        # 2. XML Format: <tool_use><n>name</n><arguments>...</arguments></tool_use>
-        if '<tool_use>' in content:
-            pattern = r'<tool_use>.*?<n>([^<]+)</n>.*?<arguments>(.*?)</arguments>.*?</tool_use>'
-            for name, args_str in re.findall(pattern, content, re.DOTALL):
-                args_clean = args_str.strip()
-                try:
-                    json.loads(args_clean)
-                    tool_calls.append({
-                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
-                        'function': {'name': name.strip(), 'arguments': args_clean}
-                    })
-                except json.JSONDecodeError:
-                    continue
-            if tool_calls:
-                return tool_calls
-
-        # 3. Simplified / Nested-tag Format
-        SKIP_NAMES = {'function_calls', 'function_call', 'call'}
-
-        for match in re.finditer(r'\<(\w+)\>', content):
-            name = match.group(1)
-            if name.lower() in SKIP_NAMES:
-                continue
-
-            closing_tag = f'</{name}>'
-            # Also accept mismatched closing like </todo> for <todo_write>
-            has_exact_close = closing_tag in content[match.end():]
-            has_any_close = bool(re.search(r'\</\w+\>', content[match.end():]))
-            if not has_exact_close and not has_any_close:
-                continue
-
-            json_start = match.end()
-            while json_start < len(content) and content[json_start] in ' \t\r\n':
-                json_start += 1
-
-            if json_start >= len(content):
-                continue
-
-            next_char = content[json_start]
-
-            if next_char == '{':
-                # Sub-format a: JSON object inline <tool_name>{...}</tool_name>
-                peek = content[json_start + 1:].lstrip()
-                if not (peek.startswith('"') or peek.startswith('}')):
-                    continue
-                args_clean = self._extract_json_from_pos(content, json_start)
-                if args_clean is None:
-                    continue
-                try:
-                    parsed_json = json.loads(args_clean)
-                    if isinstance(parsed_json, (dict, list)):
-                        tool_calls.append({
-                            'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
-                            'function': {'name': name, 'arguments': args_clean}
-                        })
-                except json.JSONDecodeError:
-                    continue
-
-            elif next_char == '<':
-                # Sub-format b: nested sub-tags <tool_name><param>val</param></tool_name>
-                close_pos = content.find(closing_tag, match.end())
-                if close_pos == -1:
-                    continue
-                inner = content[match.end():close_pos]
-                if not inner.lstrip().startswith('<'):
-                    continue
-
-                params: dict = {}
-                pos = 0
-                while pos < len(inner):
-                    # Find next opening tag <name>
-                    open_match = re.search(r'\<(\w+)\>', inner[pos:])
-                    if not open_match:
-                        break
-                    sub_name = open_match.group(1)
-                    content_start = pos + open_match.end()
-                    
-                    # Find the LAST occurrence of </name> (not first) to handle nested content
-                    close_tag = f'</{sub_name}>'
-                    # Search from content_start forward
-                    close_pos = inner.find(close_tag, content_start)
-                    if close_pos == -1:
-                        break
-                    
-                    raw_val = inner[content_start:close_pos]
-                    # Trim only single wrapping newline from tag formatting
-                    if raw_val.startswith('\n'):
-                        raw_val = raw_val[1:]
-                    if raw_val.endswith('\n'):
-                        raw_val = raw_val[:-1]
-                    
+        # 1. New Format: §FUNC§...§END_FUNC§
+        if '§FUNC§' in content:
+            # Find all FUNC blocks - handle potential variations in end marker
+            func_pattern = r'§FUNC§(.*?)(?:§END_FUNC§|§FUNC§)'
+            func_matches = re.findall(func_pattern, content, re.DOTALL)
+            
+            for func_block in func_matches:
+                # Find all §CALL§...§END_CALL§ within
+                call_pattern = r'§CALL§(.*?)(?:§END_CALL§)'
+                call_matches = re.findall(call_pattern, func_block, re.DOTALL)
+                
+                for call_json in call_matches:
                     try:
-                        params[sub_name] = json.loads(raw_val)
-                    except (json.JSONDecodeError, ValueError):
-                        params[sub_name] = raw_val  # exact string, no strip
-                    
-                    pos = close_pos + len(close_tag)
+                        call_data = json.loads(call_json)
+                        name = call_data.get('name')
+                        args_val = call_data.get('args')
+                        
+                        if name and args_val is not None:
+                            # Ensure arguments is a string for OpenAI compatibility
+                            if isinstance(args_val, dict):
+                                args_str = json.dumps(args_val)
+                            elif isinstance(args_val, str):
+                                args_str = args_val
+                                # Handle double-escaped JSON strings from the model
+                                try:
+                                    # Try to parse as JSON to see if it's a double-encoded string
+                                    json.loads(args_str)
+                                    # If it parses, it might be double-encoded or just a valid JSON string.
+                                    # In many LLM cases, if args is a string like "{\"key\": \"val\"}",
+                                    # we want to keep it as is for the API, or unescape it if it was double-escaped.
+                                    # However, standard OpenAI API expects arguments to be a JSON string.
+                                    # If the model sends a stringified JSON, we usually pass it directly.
+                                    # But if it's double escaped (e.g. "{\\"key\\": ...}"), we need to unescape once.
+                                    # A simple check: if it starts with { and ends with }, try to parse it.
+                                    # If it fails, it might be double escaped.
+                                except json.JSONDecodeError:
+                                    # If it fails, it might be a raw string or malformed.
+                                    pass
+                            else:
+                                args_str = str(args_val)
+                                
+                            tool_calls.append({
+                                'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
+                                'function': {'name': name, 'arguments': args_str}
+                            })
+                    except (json.JSONDecodeError, KeyError, Exception) as e:
+                        # Retry with unescaping if it looks like a double-escaped string
+                        try:
+                            # Sometimes the whole call_json is a string containing the JSON
+                            if isinstance(call_json, str) and call_json.strip().startswith('"'):
+                                unescaped_call = json.loads(call_json)
+                                if isinstance(unescaped_call, dict):
+                                    name = unescaped_call.get('name')
+                                    args_val = unescaped_call.get('args')
+                                    if name and args_val is not None:
+                                        if isinstance(args_val, dict):
+                                            args_str = json.dumps(args_val)
+                                        else:
+                                            args_str = str(args_val)
+                                        tool_calls.append({
+                                            'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
+                                            'function': {'name': name, 'arguments': args_str}
+                                        })
+                                        continue
+                        except:
+                            pass
+                        log_raw("DEBUG", "TOOL_PARSE", f"Failed to parse call JSON: {e} | Content: {call_json[:100]}")
+                        pass
+                        
+            if tool_calls:
+                return tool_calls
 
-                if params:
-                    tool_calls.append({
-                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
-                        'function': {'name': name, 'arguments': json.dumps(params)}
-                    })
-
-        # 4. XML Attribute Format: <tag_name attr="value"></tag_name>
-        if not tool_calls:
-            attr_pattern = r'\<(\w+)\s+([^>]*)\>\s*\</\1\>'
-            for match in re.finditer(attr_pattern, content):
-                name = match.group(1)
-                attrs_str = match.group(2)
-                # Parse attributes like plan="value"
-                attr_dict = {}
-                for attr_match in re.finditer(r'(\w+)="([^"]*)"', attrs_str):
-                    attr_dict[attr_match.group(1)] = attr_match.group(2)
-                if attr_dict:
-                    tool_calls.append({
-                        'id': f'call_{int(time.time() * 1000)}_{len(tool_calls)}',
-                        'function': {'name': name, 'arguments': json.dumps(attr_dict)}
-                    })
-
-        seen = set()
-        unique_calls = []
-        for tc in tool_calls:
-            # Normalize arguments for dedup comparison
-            try:
-                args_normalized = json.dumps(json.loads(tc['function']['arguments']), sort_keys=True)
-            except (json.JSONDecodeError, ValueError):
-                args_normalized = tc['function']['arguments']
-            key = (tc['function']['name'], args_normalized)
-            if key not in seen:
-                seen.add(key)
-                # Reassign sequential IDs AFTER dedup to ensure uniqueness
-                tc['id'] = f'call_{int(time.time() * 1000)}_{len(unique_calls)}'
-                unique_calls.append(tc)
-
-        return unique_calls if unique_calls else None
+        return None
 
     def get_chat_id(self) -> str:
         return self.chat_id
