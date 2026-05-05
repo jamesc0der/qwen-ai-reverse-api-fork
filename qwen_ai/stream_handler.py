@@ -79,18 +79,32 @@ class QwenAiStreamHandler:
         """Remove tool results and conversation history that Qwen echoes back in its response."""
         # if not content:
         #     return content
-            
+
         # Remove new tool result format (flexible § count)
         # Use a more specific pattern to avoid stripping too much
         # content = re.sub(r'§TOOL_RESULT§.*?§END_TOOL_RESULT§', '', content, flags=re.DOTALL)
 
         # Remove "User: ..." and "Assistant: ..." prefixes that get echoed
-        content = re.sub(r'\n(User|Assistant):\s', '\n', content)
+        content = re.sub(r'\n(User|Assistant):\s+', '\n', content)
 
-        # Clean up excessive blank lines left behind
+        # Clean up excessive blank lines left behind - preserve double newlines for formatting
         content = re.sub(r'\n{3,}', '\n\n', content)
 
-        return content.strip()
+        # # Only strip leading/trailing newlines and carriage returns, not all whitespace, to preserve sentence spacing
+        # # IMPORTANT: Preserve double newlines at the beginning and end that are critical for formatting
+        # leading_double_newline = content.startswith('\n\n')
+        # trailing_double_newline = content.endswith('\n\n')
+        
+        # content = content.rstrip('\n\r')
+        # content = content.lstrip('\n\r')
+        
+        # # Restore critical double newlines if they were present
+        # if leading_double_newline:
+        #     content = '\n\n' + content
+        # if trailing_double_newline:
+        #     content = content + '\n\n'
+        
+        return content
 
     def handle_stream(self, response) -> Generator[str, None, None]:
         log_raw("DEBUG", "STREAM_HANDLER", f"Starting stream handling for chat_id={self.chat_id}, model={self.model}")
@@ -230,7 +244,7 @@ class QwenAiStreamHandler:
                         # --- Suppression block handling ---
                         if not self._in_suppressed_block:
                             suppress_start = re.search(
-                                r'\[Tool Result for',
+                                r'\[ToolResult',
                                 self._pre_emit_buffer + content
                             )
                             if suppress_start:
@@ -242,14 +256,27 @@ class QwenAiStreamHandler:
                                 content = safe_text  # only process text before suppressed block
                             else:
                                 combined = self._pre_emit_buffer + content
-                                safe_len = max(0, len(combined) - 200)
-                                content = combined[:safe_len]        # safe to process
-                                self._pre_emit_buffer = combined[safe_len:]
+                                # Only slice if we have a significant buffer to avoid cutting words
+                                # Keep a minimum safe distance from word boundaries
+                                if len(combined) > 200:
+                                    # Find a safe break point (preferably at a space or punctuation)
+                                    safe_len = max(100, len(combined) - 200)  # Minimum 100 chars to preserve
+                                    # Look for a space near the safe_len position to avoid cutting words
+                                    break_point = safe_len
+                                    for i in range(safe_len, max(0, safe_len - 50), -1):  # Search backwards up to 50 chars
+                                        if i < len(combined) and combined[i].isspace():
+                                            break_point = i + 1  # Include the space in the content
+                                            break
+                                    content = combined[:break_point]        # safe to process
+                                    self._pre_emit_buffer = combined[break_point:]
+                                else:
+                                    content = combined
+                                    self._pre_emit_buffer = ''
                         else:
                             # Inside suppressed block — accumulate and check for closing tag
                             self._pre_emit_buffer += content
                             close_match = re.search(
-                                r'\[\/Tool Result\]',
+                                r'\[\/ToolResult\]',
                                 self._pre_emit_buffer
                             )
                             if close_match:

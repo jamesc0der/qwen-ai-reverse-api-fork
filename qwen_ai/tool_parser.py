@@ -143,4 +143,4 @@ class ToolParser:
         Returns:
             str: Formatted tool result
         """
-        return f"""[Tool Result for {tool_name} {tool_call_id}]\n{result}\n[/Tool Result]"""
+        return f"""[ToolResult id={tool_call_id}]\n{result}\n[/ToolResult]"""

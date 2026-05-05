@@ -66,3 +66,4 @@ vless_nodes.json
 
 # Development
 test_*.py
+session-*.md
